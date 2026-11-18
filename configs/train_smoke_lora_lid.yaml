@@ -1,0 +1,49 @@
+# Smoke-Test Configuration 2: Whisper LoRA + Auxiliary Language Identification (LID) Head
+experiment_name: "smoke_whisper_lora_lid"
+run_tier: "smoke_test"  # Keeps smoke-test outputs strictly separate from full benchmark results
+base_model_name_or_path: "openai/whisper-small"
+allow_tiny_architecture_for_cpu_smoke: true
+
+lora:
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "out_proj"
+  decoder_attention_only: true
+
+auxiliary_lid:
+  enabled: true
+  lid_loss_weight: 0.30
+  num_labels: 3  # 0: HI, 1: EN, 2: OTHER
+  hidden_dropout: 0.1
+
+curriculum:
+  enabled: true
+  stages:
+    - name: "stage1_monolingual"
+      description: "Monolingual Hindi and English speech"
+      filter_mode: "monolingual"
+      epochs: 1
+      learning_rate: 1.0e-4
+    - name: "stage2_real_mixed"
+      description: "Natural Hindi-English code-switched speech"
+      filter_mode: "real_mixed"
+      epochs: 1
+      learning_rate: 8.0e-5
+    - name: "stage3_synthetic_supplement"
+      description: "Optional synthetic mixed speech supplement (train split only)"
+      filter_mode: "all_with_synthetic"
+      epochs: 1
+      learning_rate: 5.0e-5
+
+training:
+  batch_size: 2
+  gradient_accumulation_steps: 1
+  max_steps_per_stage: 2
+  seed: 42
+  output_dir: "outputs/smoke_checkpoints/lora_plus_lid"
+  manifest_path: "data/demo_fixture/manifest.jsonl"

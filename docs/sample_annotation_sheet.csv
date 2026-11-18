@@ -1,0 +1,17 @@
+utterance_id,word_index,raw_word,script_detected,auto_heuristic_tag,reviewed_tag,switch_role,annotator_notes,review_status
+utt_sample_001,0,kal,Latin,EN_FALSE_GUESS,HI,before_switch (HI->EN),"Romanized Hindi 'कल' (tomorrow); script alone would misclassify as EN",reviewed
+utt_sample_001,1,meeting,Latin,EN,EN,after_switch (HI->EN) & before_switch (EN->HI),"Overlapping boundary word: touched by kal->meeting and meeting->ke (counted once in pooled boundary score)",reviewed
+utt_sample_001,2,ke,Latin,EN_FALSE_GUESS,HI,after_switch (EN->HI),"Romanized Hindi postposition 'के'",reviewed
+utt_sample_001,3,baad,Latin,EN_FALSE_GUESS,HI,non_boundary,"Romanized Hindi 'बाद'",reviewed
+utt_sample_001,4,main,Latin,AMBIGUOUS,HI,before_switch (HI->EN),"Ambiguous homograph: here Hindi pronoun 'मैं' (I), not English adjective 'main'",reviewed
+utt_sample_001,5,report,Latin,EN,EN,after_switch (HI->EN),"English noun 'report'; report->submit stays within EN",reviewed
+utt_sample_001,6,submit,Latin,EN,EN,before_switch (EN->HI),"English verb 'submit' before Hindi light verb 'kar'",reviewed
+utt_sample_001,7,kar,Latin,EN_FALSE_GUESS,HI,after_switch (EN->HI),"Romanized Hindi 'कर'",reviewed
+utt_sample_001,8,dunga,Latin,EN_FALSE_GUESS,HI,non_boundary,"Romanized Hindi auxiliary 'दूंगा'",reviewed
+utt_sample_002,0,Rahul,Latin,OTHER,OTHER,non_boundary,"Proper person name -> tagged OTHER (does not trigger language switch)",reviewed
+utt_sample_002,1,अरे,Devanagari,HI,HI,non_boundary,"Hindi lexical interjection 'arey' -> tagged HI",reviewed
+utt_sample_002,2,हम्म,Devanagari,HI_FALSE_GUESS,OTHER,non_boundary,"Non-lexical vocal hesitation filler 'hmm' -> tagged OTHER",reviewed
+utt_sample_002,3,आज,Devanagari,HI,HI,before_switch (HI->EN),"Hindi adverb 'aaj' (today)",reviewed
+utt_sample_002,4,मीटिंग,Devanagari,HI_FALSE_GUESS,EN,after_switch (HI->EN),"English word 'meeting' written in Devanagari; normalized equivalent maps to 'meeting'",reviewed
+utt_sample_002,5,कैंसिल,Devanagari,HI_FALSE_GUESS,EN,before_switch (EN->HI),"English word 'cancel' written in Devanagari",reviewed
+utt_sample_002,6,है,Devanagari,HI,HI,after_switch (EN->HI),"Hindi copula 'hai'",reviewed
