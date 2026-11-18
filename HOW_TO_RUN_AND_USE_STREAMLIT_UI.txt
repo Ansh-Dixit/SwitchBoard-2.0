@@ -15,240 +15,159 @@ Step 3: Launch the Streamlit application:
 
     python -m streamlit run switchboard/app/streamlit_app.py
 
-Step 4: Your browser will automatically open at:
+Step 4: Open your browser at:
 
     http://localhost:8501
-
-(If it does not open automatically, copy and paste http://localhost:8501 into
-Chrome or Edge.)
 
 
 2. COMPLETE GUIDE TO ALL TABS & FUNCTIONS IN THE STREAMLIT UI
 --------------------------------------------------------------------------------
-The Streamlit application (`switchboard/app/streamlit_app.py`) is organized into
-THREE main tabs at the top of the page:
+The Streamlit application (`switchboard/app/streamlit_app.py`) has THREE main tabs:
 
   [Tab 1] "1. Interactive Demo & Switch-Boundary Inspector"
   [Tab 2] "2. Saved Benchmark Results & Error Analysis"
-  [Tab 3] "3. Annotation Sheet, Normalization & Walkthrough"
-
-Below is what every section, button, dropdown, and table on each tab does.
+  [Tab 3] "3. Dataset, Provenance & Annotation Guidelines"
 
 --------------------------------------------------------------------------------
 TAB 1: INTERACTIVE DEMO & SWITCH-BOUNDARY INSPECTOR
 --------------------------------------------------------------------------------
-This tab lets you test individual Hindi–English utterances, play audio, compare
-Baseline Whisper Small against our Fine-Tuned Whisper Small (PEFT LoRA +
-Auxiliary Language Identification Head), edit word-level language tags, and
-visually inspect word errors right at language-switch boundaries.
+This tab lets you test individual Hindi–English utterances, play audio, run live
+PyTorch transcription with `openai/whisper-small` and PEFT LoRA (+ Auxiliary LID
+Head) checkpoints, edit word-level language tags (`HI`, `EN`, `OTHER`), and
+inspect word errors at language-switch boundaries (`HI -> EN` and `EN -> HI`).
 
 A. "Step 1: Select Audio Source" (Top-Left Panel)
    You have 4 radio-button options for choosing the input audio:
 
-   1) "Real MUCS 2021 Hindi–English Corpus (517 Held-Out Test Utterances)"
-      - Default mode when your extracted MUCS 2021 dataset is present.
-      - Displays a dropdown list of real human-spoken Hindi–English lecture
-        utterances from the held-out test speakers (`mucs_834022`, `mucs_847066`,
-        `mucs_918821`, `mucs_921151`, `mucs_957491`).
-      - Selecting any utterance loads its real 16 kHz mono WAV audio clip, its
-        reference transcript, its word-level HI/EN/OTHER language tags, and the
-        Baseline vs. Fine-Tuned model hypotheses.
+   1) "Real MUCS 2021 Held-Out Test Utterances (Real Whisper Predictions)"
+      - Default mode when the processed MUCS 2021 dataset is present.
+      - Utterances marked `✅ [EVALUATED]` at the top of the dropdown have real
+        saved predictions from `openai/whisper-small` and the PEFT checkpoints in
+        `outputs/full_benchmark_real/`.
+      - For any other utterance in the list, click the button
+        "⚡ Run Live PyTorch Transcription on Active Audio" to transcribe it live!
 
    2) "Bundled Hinglish Examples (Ready-to-Try Demo Fixture)"
-      - Lets you choose from the 5 self-contained demo fixture test utterances,
-        starting with the canonical example:
+      - Displays the 5 self-contained classroom demo utterances from `data/demo/`,
+        starting with:
         `demo_test_utt_01: "kal meeting ke baad main report submit kar dunga"`
-      - Useful for demonstrating specific edge cases in class:
-        * `demo_test_utt_01`: Overlapping switch boundary on "meeting"
-          (`kal [HI] -> meeting [EN] -> ke [HI]`) and same-language continuation
-          (`report [EN] -> submit [EN]`).
-        * `demo_test_utt_02`: Same sentence written completely in Devanagari
-          (`"आज मीटिंग के बाद मैं रिपोर्ट सबमिट कर दूंगा"`) to demonstrate
-          cross-script normalization (`"मीटिंग"` -> `"meeting"`).
-        * `demo_test_utt_03`: Proper name (`"Rahul"`) + hesitation filler
-          (`"umm"`) tagged as `OTHER` to show that `OTHER` tokens do not trigger
-          false language switches.
-        * `demo_test_utt_05`: Monolingual Hindi control sentence (`CMI = 0`),
-          showing that `Boundary WER` is automatically marked `"Unavailable (0/0)"`
-          when an utterance has zero language switches.
+      - Because this mode uses synthetic harmonic audio and scripted pedagogical
+        hypotheses by default, the app displays a prominent warning banner:
+        `🚨 SIMULATED DATA — NOT REAL MODEL RESULTS`.
+      - You can also click "⚡ Run Live PyTorch Transcription on Active Audio" at
+        any time to run real `openai/whisper-small` on the active audio file.
 
    3) "Upload Audio File (.wav, .mp3, .flac)"
-      - Opens a drag-and-drop file uploader.
-      - When you upload any `.wav`, `.mp3`, `.flac`, or `.ogg` file, SwitchBoard
-        automatically converts stereo to mono, resamples the audio to 16,000 Hz
-        16-bit PCM WAV, computes its duration in seconds, and loads it into the
-        audio player.
-      - You can test this immediately by uploading any `.wav` file from:
-        `C:\Users\Manas Nigam\Desktop\SwitchBoard\data\processed\audio_16k\mucs2021_hi_en\test\`
+      - Upload any `.wav`, `.mp3`, `.flac`, or `.ogg` file (for example, any file
+        from `data/processed/audio_16k/mucs2021_hi_en/test/`).
+      - SwitchBoard automatically converts stereo to mono, resamples to 16,000 Hz
+        16-bit PCM WAV, and runs live `openai/whisper-small` and PEFT checkpoint
+        transcription on the uploaded file.
 
    4) "Record via Microphone"
-      - Renders Streamlit's built-in browser microphone recorder (`st.audio_input`).
-      - Click the microphone icon, grant browser microphone permission, speak a
-        Hindi–English sentence (e.g., "kal meeting ke baad main report submit kar dunga"),
-        and click Stop.
-      - SwitchBoard automatically resamples your live recording to 16 kHz mono WAV
-        and runs the comparison pipeline.
+      - Click the microphone icon in `st.audio_input`, grant browser microphone
+        permission, speak a Hindi–English sentence, and click Stop.
+      - SwitchBoard resamples your recording to 16 kHz mono WAV and runs live
+        `openai/whisper-small` and PEFT checkpoint transcription on it.
 
-B. "Checkpoint & Availability Settings" (Top-Right Panel)
+B. "Checkpoint & Inference Settings" (Top-Right Panel)
    1) "Fine-Tuned Whisper Checkpoint" Dropdown:
-      - "Demo / Smoke-Test Fine-Tuned Adapter (LoRA + LID Head)": Uses the fast
-        adapter checkpoint.
-      - "Full Research Corpus Checkpoint": Uses the checkpoint trained on your
-        3,136-utterance MUCS 2021 dataset (`outputs/full_checkpoints/whisper_small_lora_plus_lid`).
-      - "Simulate Fine-Tuned Checkpoint Unavailable (Test Graceful Fallback)":
-        Select this during your presentation to demonstrate requirement 6.2 —
-        the app displays a clear yellow warning banner showing that the
-        fine-tuned checkpoint is unavailable while keeping the Baseline Whisper
-        transcription and boundary evaluation 100% usable.
+      - `Whisper Small + LoRA + Auxiliary LID Head (checkpoints/whisper_small_lora_plus_lid)`
+      - `Whisper Small + LoRA Only (checkpoints/whisper_small_lora_only)`
+      - `Full Colab GPU Checkpoint (checkpoints/colab_full_whisper_small_lora_plus_lid)`
+      - `Simulate Fine-Tuned Checkpoint Unavailable (Test Missing-Checkpoint Warning)`:
+        Displays a clear warning banner when a checkpoint is missing or disabled
+        while keeping Baseline Whisper Small transcription 100% operational.
+        (Note: The app also automatically blocks any unit-test tiny fallback
+        checkpoint from ever being loaded as an ASR model.)
 
-   2) "Run Live Neural Inference on Audio" Checkbox:
-      - Unchecked (Default): Loads pre-computed benchmark hypotheses instantly
-        so you can click through utterances with zero waiting latency during a
-        live presentation.
-      - Checked: Runs a live PyTorch forward pass through the loaded PEFT model
-        weights on the selected audio file.
+   2) "⚡ Run Live PyTorch Transcription on Active Audio" Button:
+      - Executes a live forward pass through `openai/whisper-small` and the
+        selected PEFT checkpoint on the currently active audio file and displays
+        measured latency (seconds) and Real-Time Factor (`RTF`).
 
-C. Audio Player Bar
-   - Plays the active 16 kHz mono WAV file directly in the browser (`st.audio`).
+C. "Step 2: Side-by-Side ASR Output Comparison"
+   - Left Column: Primary Baseline (`openai/whisper-small`) raw transcript,
+     normalized transcript, decoding settings (`task='transcribe'`), latency, and RTF.
+   - Right Column: Fine-Tuned (`Whisper Small + PEFT LoRA + Auxiliary LID Head`)
+     raw transcript, normalized transcript, latency, and RTF (or clear warning
+     if the checkpoint is unavailable).
 
-D. "Step 2: Side-by-Side ASR Output Comparison"
-   - Left Column ("Primary Baseline: openai/whisper-small"):
-     * Shows the raw transcript produced by Baseline Whisper Small.
-     * The text box is interactive/editable: you can type or modify words inside
-       it during a demo to show how adding/removing errors changes the alignment
-       and Boundary WER in real time!
-     * Below the box, it displays the **Normalized Baseline** text (after
-       Unicode NFC, punctuation removal, lowercasing, and cross-script mapping)
-       along with the checkpoint name, decoding mode (`task='transcribe'`),
-       transcription latency (seconds), and Real-Time Factor (`RTF`).
-   - Right Column ("Fine-Tuned: Whisper Small + PEFT LoRA + Auxiliary LID Head"):
-     * Shows the raw and normalized transcript from the fine-tuned model side by
-       side with Baseline Whisper, plus its latency and RTF.
-
-E. "Step 3: Reference Transcript & Word-Level Language Tag Review (HI, EN, OTHER)"
+D. "Step 3: Reference Transcript & Editable Word-Level Language Tags (HI, EN, OTHER)"
    1) Reference Transcript Input Box:
-      - Shows the ground-truth reference sentence. You can edit this or type a
-        reference transcript for an uploaded/recorded audio clip.
-   2) Interactive Word-Level Language Tag Editor Table (`st.data_editor`):
-      - Displays 4 columns for every word in the reference transcript:
-        * `Index`: 0-based word position (`0, 1, 2, ...`).
-        * `Raw Reference Word`: The original word as written in Devanagari or Roman script.
-        * `Normalized Form`: What the word normalizes to via `configs/normalization_equivalents.yaml`
-          (for example, `"मीटिंग"` or `"क्लिक"` normalizes to `"meeting"` or `"click"`).
-        * `Reviewed Language Tag`: An interactive dropdown cell where you can
-          click and change any word's tag between `HI`, `EN`, and `OTHER`!
-          When you change a tag in this table, the switch-boundary badges and
-          Boundary WER below update immediately.
-   3) "Switch-Boundary Word Highlighting (HI -> EN and EN -> HI)" Badges:
-      - Renders every reference word as a visual pill with its language badge:
-        * Blue pill (`HI`) = Hindi word
-        * Green pill (`EN`) = English word
-        * Gray pill (`OTHER`) = Proper name, filler (`umm`, `हम्म`), number, or software name
-      - Words immediately before or after a language switch get an orange border
-        and lightning badge:
-        * `⚡Pre` = Word immediately BEFORE a language switch
-        * `⚡Post` = Word immediately AFTER a language switch
-        * Red border + `⚡⇄2x-Switch` = Overlapping boundary word touched by TWO
-          switches (e.g., `"meeting"` in `"kal [HI] meeting [EN] ke [HI]"`).
-          Counted only ONCE in the pooled Boundary WER denominator!
-   4) "Word-Level Alignment & Edit Attribution (MATCH, SUB, DEL, INS)":
-      - Compares the Baseline alignment (left) vs. Fine-Tuned alignment (right)
-        using color-coded operation badges:
-        * Green `✓ word ⚡`: Exact match (`MATCH`)
-        * Red `SUB [ref -> hyp] (ref#i⚡)`: Substitution error assigned to reference word `i`
-        * Pink dashed `DEL [ref -> ∅] (ref#i⚡)`: Deletion error assigned to reference word `i`
-        * Purple `INS [+ hyp] (attr->ref#i⚡)`: Insertion error deterministically
-          attributed to reference position `i = max(0, cursor - 1)`
-      - Beneath each alignment, 4 KPI metric cards display:
-        * `Norm Overall WER`: Normalized Word Error Rate `%(errors/words)`
-        * `Raw Overall WER`: Pre-normalization Word Error Rate `%(errors/words)`
-        * `Boundary WER`: Error rate specifically on switch-adjacent words `%(errors/boundary_words)`
-        * `Non-Boundary WER`: Error rate on non-switching words `%(errors/non_boundary_words)`
-      - The bottom caption shows the utterance's **Code-Mixing Index (CMI)**,
-        CMI regime bucket, number of switches, switch directions, and overlapping
-        boundary word count.
+      - Edit or enter the ground-truth reference sentence.
+   2) Space-Separated Word-Level Language Tags Input Box:
+      - Standard text input containing 1 tag (`HI`, `EN`, or `OTHER`) per word
+        (e.g., `"HI EN HI HI HI EN EN HI HI"`). Editing any tag here immediately
+        updates the boundary roles, visual badges, and Boundary WER!
+   3) "🔧 Click to Edit Individual Word Tags via Dropdown Selectors" Expander:
+      - Standard HTML dropdown (`st.selectbox`) for every individual word
+        (`#0: kal`, `#1: meeting`, ...), replacing the old canvas-only grid so
+        manual tag editing works reliably in all browsers and automation tools.
+   4) Switch-Boundary Word Highlighting & Alignment Badges:
+      - Highlights every reference word with its language tag (`HI` blue, `EN`
+        green, `OTHER` gray) and boundary role (`⚡Pre`, `⚡Post`, or red
+        `⚡⇄2x-Switch` for overlapping boundary words counted once).
+      - Displays word-level alignment operations (`MATCH`, `SUB`, `DEL`, `INS`,
+        `UTT_INS`) and 4 metric cards (`Norm Overall WER`, `Raw Overall WER`,
+        `Boundary WER`, `Non-Boundary WER`) plus utterance **CMI**.
 
 --------------------------------------------------------------------------------
 TAB 2: SAVED BENCHMARK RESULTS & ERROR ANALYSIS
 --------------------------------------------------------------------------------
-This tab loads the saved corpus evaluation files from disk and displays aggregate
-research metrics.
+Strictly separates three distinct result tiers:
 
-1) "Select Benchmark Result Tier" Radio Selector:
-   - "Full Research Corpus Benchmark (`outputs/full_benchmark`) — [REAL MUCS 2021 CORPUS: 517 Held-Out Test Utterances]" (Default)
-     * Loads the benchmark evaluated on the 517 held-out test utterances (6,559
-       words, 2,852 switch-boundary words) from your `Hindi-English_test.tar.gz` dataset.
-   - "Demo Fixture Benchmark (`outputs/demo_evaluation`) — [DEMO FIXTURE: 5 Test Utterances]"
-     * Loads the self-contained 5-utterance test fixture results (kept strictly
-       separate from full research results).
-   - "Live Smoke-Test Evaluation (`outputs/live_evaluation`) — [SMOKE TEST]"
+  1) "Real Model Benchmark Results (`outputs/full_benchmark_real`) — [REAL MODEL MEASUREMENTS]"
+     - Default view. Loads actual neural model evaluation metrics on the held-out
+       MUCS 2021 Hindi–English test split.
+     - Never allows simulated or demo fixture records.
+     - Displays the Model Comparison Table (Raw WER, Norm WER, Norm CER,
+       Boundary WER, Non-Boundary WER, `HI->EN` WER, `EN->HI` WER, Pre-Switch WER,
+       Post-Switch WER, Mean CMI, RTF, and `Boundary WER Improved?`), skipped/blocked
+       checkpoint status, directional/positional breakdowns, CMI range table,
+       speaker/accent breakdowns, and per-utterance table.
 
-2) "1. Model Comparison Table (Same Held-Out Test Split)":
-   - Displays all 4 evaluated models side by side on the exact same test split:
-     * `whisper_small_baseline` (`openai/whisper-small`)
-     * `indicwhisper_hi_comparison` (`vasista22/whisper-hindi-small`)
-     * `whisper_small_lora_only` (LoRA adapters in decoder attention, no LID loss)
-     * `whisper_small_lora_plus_lid` (LoRA adapters + Auxiliary LID Head on decoder hidden states)
-   - Columns include: Raw WER, Norm WER, Norm CER, Boundary WER, Non-Boundary WER,
-     `HI->EN` WER, `EN->HI` WER, Pre-Switch WER, Post-Switch WER, Mean CMI, RTF,
-     and `Boundary WER Improved?` (showing the exact percentage-point improvement).
+  2) "Smoke-Test Verification Results (`outputs/smoke_test`) — [SMOKE TEST ONLY]"
+     - Displays short pipeline verification outputs.
 
-3) Detailed Subgroup Breakdowns (Select any model from the dropdown):
-   - 5 KPI Cards: Normalized WER, Raw WER (Pre-Norm), Boundary WER,
-     Non-Boundary WER, and Mean CMI / RTF.
-   - "Switch Direction & Position Breakdown" Table:
-     * Compares `HI -> EN` vs. `EN -> HI` switch directions and `Word Immediately
-       Before Switch` vs. `Word Immediately After Switch`, showing exact `Errors`,
-       `Words`, and `S / D / I` counts.
-   - "Error Rates Across Code-Mixing Index (CMI) Ranges" Table:
-     * Buckets utterances into `0 (Monolingual)`, `0-15 (Low Mixing)`,
-       `15-30 (Moderate Mixing)`, and `>30 (High Mixing)` and reports Pearson
-       correlation `r` between utterance CMI and WER.
-   - "Breakdown by Speaker ID" & "Breakdown by Accent" Tables:
-     * Shows per-speaker WER, Boundary WER, and Non-Boundary WER across the
-       held-out test speakers (`mucs_834022`, `mucs_847066`, `mucs_918821`,
-       `mucs_921151`, `mucs_957491`).
-   - "Per-Utterance Results Table":
-     * Searchable, sortable dataframe of all 517 evaluated test utterances.
+  3) "Classroom Demo Fixture (`outputs/demo`) — [SIMULATED DATA — NOT REAL MODEL RESULTS]"
+     - Displays the 5-utterance synthetic classroom demo fixture under a red
+       `SIMULATED DATA — NOT REAL MODEL RESULTS` warning banner.
 
 --------------------------------------------------------------------------------
-TAB 3: ANNOTATION SHEET, NORMALIZATION & WALKTHROUGH
+TAB 3: DATASET, PROVENANCE & ANNOTATION GUIDELINES
 --------------------------------------------------------------------------------
-1) "Sample Reviewed Word-Level Annotation Sheet":
-   - Renders `docs/sample_annotation_sheet.csv`, showing how ambiguous words
-     (like Romanized `"main"`, Devanagari English `"मीटिंग"`, proper names like
-     `"Rahul"`, and vocal fillers like `"हम्म"`) are annotated and why script
-     alone cannot determine language.
-2) "Verified Baseline & Comparison Checkpoints":
-   - Shows the live verification table of all registered models, their licenses,
-     language coverage, and explicit CTC head dependency status (highlighting
-     that `facebook/wav2vec2-xls-r-300m` requires training a CTC head before
-     transcription, whereas `Harveenchadha/vakyansh-wav2vec2-hindi-him-4200`
-     includes a trained CTC head).
-3) Expandable viewers for `docs/ANNOTATION_GUIDELINES.md` and
-   `configs/normalization_equivalents.yaml`.
+  1) Dataset Split Summary & Provenance (`data/full_corpus/unified_manifest.jsonl`):
+     - Shows exact utterance counts, disjoint speaker counts, duration in hours,
+       and sample canonical manifest records (`original_transcript`,
+       `normalized_transcript`, `word_level_language_tags`).
+  2) Sample Reviewed Word-Level Annotation Sheet (`docs/sample_annotation_sheet.csv`).
+  3) Verified Baseline & Comparison Checkpoints Table (including `requires_ctc_head_training`
+     status for `facebook/wav2vec2-xls-r-300m`).
+  4) Expandable viewers for `docs/ANNOTATION_GUIDELINES.md` and
+     `configs/normalization_equivalents.yaml`.
 
 
-3. ALL TERMINAL / CLI COMMANDS FOR RUNNING TESTS, TRAINING & EVALUATION
+3. ALL TERMINAL / CLI COMMANDS
 --------------------------------------------------------------------------------
-Run any of these commands from `C:\Users\Manas Nigam\Desktop\SwitchBoard`:
+Run from `C:\Users\Manas Nigam\Desktop\SwitchBoard`:
 
-  # Run the 11 automated unit & integration tests (pytest)
+  # 1. Run all 23 automated unit & integration tests
   python -m pytest -v
 
-  # Validate the 3,136-utterance real MUCS 2021 manifest and audio files
-  python -m switchboard.cli validate-manifest --manifest data/full_corpus/unified_manifest.jsonl --check-audio
+  # 2. Validate the 3,136-utterance real MUCS 2021 manifest
+  python -m switchboard.cli validate-manifest --manifest data/full_corpus/unified_manifest.jsonl --check-audio --forbid-demo
 
-  # Re-run switch-boundary evaluation on all 517 held-out real MUCS 2021 test utterances
-  python -m switchboard.cli evaluate-real-mucs --max-utterances 517
-
-  # Re-run evaluation on the 5-utterance demo fixture
-  python -m switchboard.cli evaluate-demo
-
-  # Train Whisper PEFT LoRA alone vs. LoRA + Auxiliary LID Head on the real corpus
-  python -m switchboard.cli train --config configs/train_smoke_lora_only.yaml --manifest data/full_corpus/unified_manifest.jsonl --output-dir outputs/full_checkpoints/whisper_small_lora_only
-  python -m switchboard.cli train --config configs/train_smoke_lora_lid.yaml --manifest data/full_corpus/unified_manifest.jsonl --output-dir outputs/full_checkpoints/whisper_small_lora_plus_lid
-
-  # Verify model checkpoints, licenses, and CTC head status
+  # 3. Verify model checkpoints, local cache status, and CTC head dependencies
   python -m switchboard.cli verify-models
+
+  # 4. Run REAL neural model benchmark evaluation on held-out MUCS 2021 test utterances
+  python -m switchboard.cli evaluate-real-benchmark --manifest data/full_corpus/unified_manifest.jsonl --max-utterances 20 --output-dir outputs/full_benchmark_real --run-tier full_research
+
+  # 5. Run Whisper Small PEFT LoRA-only and LoRA+LID curriculum fine-tuning
+  python -m switchboard.cli train --config configs/train_smoke_lora_only.yaml
+  python -m switchboard.cli train --config configs/train_smoke_lora_lid.yaml
+
+  # 6. Launch the Streamlit application
+  python -m streamlit run switchboard/app/streamlit_app.py
 ================================================================================

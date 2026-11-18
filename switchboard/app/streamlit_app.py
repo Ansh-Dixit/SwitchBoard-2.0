@@ -1,4 +1,4 @@
-"""SwitchBoard Streamlit Demo — Hindi–English Code-Switching ASR and Switch-Boundary Error Analysis."""
+"""SwitchBoard Streamlit Application — Hindi–English Code-Switching ASR & Switch-Boundary Error Analysis."""
 
 from __future__ import annotations
 
@@ -6,21 +6,20 @@ import json
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
-# Ensure project root is on sys.path when launched via `streamlit run switchboard/app/streamlit_app.py`
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from switchboard.cli import run_demo_evaluation_suite
+from switchboard.cli import run_simulated_demo_fixture
 from switchboard.data.importers import build_demo_fixture, infer_word_tag
 from switchboard.data.manifest import ManifestRecord, load_manifest, resample_to_16k_mono
 from switchboard.evaluation.boundary import (
-     compute_cmi,
+    compute_cmi,
     detect_switch_boundaries,
     evaluate_utterance,
 )
@@ -40,23 +39,75 @@ def get_normalizer() -> TranscriptNormalizer:
     return TranscriptNormalizer(PROJECT_ROOT / "configs" / "normalization_equivalents.yaml")
 
 
-def ensure_demo_assets() -> Tuple[List[ManifestRecord], List[ManifestRecord]]:
-    manifest_path = PROJECT_ROOT / "data" / "demo_fixture" / "manifest.jsonl"
-    if not manifest_path.exists():
-        build_demo_fixture(PROJECT_ROOT / "data" / "demo_fixture")
-    eval_summary_path = PROJECT_ROOT / "outputs" / "demo_evaluation" / "all_models_summary.json"
-    if not eval_summary_path.exists():
-        run_demo_evaluation_suite(PROJECT_ROOT)
-    demo_recs = load_manifest(manifest_path, validate=True)
+@st.cache_resource
+def get_cached_whisper_baseline_runner(checkpoint_id: str = "openai/whisper-small") -> Any:
+    from switchboard.models.runners import WhisperBaselineRunner
 
-    real_manifest_path = PROJECT_ROOT / "data" / "full_corpus" / "unified_manifest.jsonl"
+    return WhisperBaselineRunner(checkpoint_id=checkpoint_id)
+
+
+@st.cache_resource
+def get_cached_whisper_peft_runner(adapter_dir_str: str) -> Any:
+    from switchboard.models.runners import WhisperPeftRunner
+
+    return WhisperPeftRunner(adapter_dir=adapter_dir_str)
+
+
+def ensure_app_assets() -> Tuple[List[ManifestRecord], List[ManifestRecord]]:
+    demo_dir = PROJECT_ROOT / "data" / "demo"
+    demo_manifest_p = demo_dir / "manifest.jsonl"
+    if not demo_manifest_p.exists():
+        build_demo_fixture(demo_dir)
+    demo_eval_p = PROJECT_ROOT / "outputs" / "demo" / "all_models_summary.json"
+    if not demo_eval_p.exists():
+        run_simulated_demo_fixture(PROJECT_ROOT)
+    demo_recs = load_manifest(demo_manifest_p, validate=True)
+
+    real_manifest_p = PROJECT_ROOT / "data" / "full_corpus" / "unified_manifest.jsonl"
     real_recs: List[ManifestRecord] = []
-    if real_manifest_path.exists():
+    if real_manifest_p.exists():
         try:
-            real_recs = load_manifest(real_manifest_path, validate=False)
+            real_recs = load_manifest(real_manifest_p, validate=False)
         except Exception:
             real_recs = []
     return demo_recs, real_recs
+
+
+def load_saved_real_predictions() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Load actual model predictions saved in `outputs/full_benchmark_real/*_per_utterance.jsonl`."""
+    real_dir = PROJECT_ROOT / "outputs" / "full_benchmark_real"
+    preds_by_model: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    if not real_dir.exists():
+        return preds_by_model
+
+    for jsonl_p in real_dir.glob("*_per_utterance.jsonl"):
+        model_key = jsonl_p.stem.replace("_per_utterance", "")
+        preds_by_model[model_key] = {}
+        for line in jsonl_p.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            preds_by_model[model_key][item["utterance_id"]] = item
+    return preds_by_model
+
+
+def check_peft_checkpoint_valid(ckpt_dir: Path) -> Tuple[bool, str]:
+    """Check whether a fine-tuned PEFT checkpoint exists and is built on a real pretrained Whisper base model."""
+    if not (ckpt_dir / "lora_adapter").exists():
+        return False, f"Checkpoint not found at `{ckpt_dir}`."
+    metrics_p = ckpt_dir / "training_metrics.json"
+    if metrics_p.exists():
+        try:
+            m = json.loads(metrics_p.read_text(encoding="utf-8"))
+            if m.get("used_tiny_fallback"):
+                return (
+                    False,
+                    f"Checkpoint at `{ckpt_dir}` used a randomly initialized tiny fallback architecture "
+                    f"and is blocked from being used as a speech recognition model.",
+                )
+        except Exception:
+            pass
+    return True, f"Valid PEFT checkpoint ready at `{ckpt_dir}`."
 
 
 def render_boundary_highlighted_html(words: List[str], lang_tags: List[str]) -> str:
@@ -104,7 +155,7 @@ def render_boundary_highlighted_html(words: List[str], lang_tags: List[str]) -> 
 
 
 def render_alignment_ops_html(alignment_ops: List[Dict[str, Any]], boundary_indices: set[int]) -> str:
-    """Render word-by-word edit operations (MATCH, SUB, DEL, INS) with boundary indicators."""
+    """Render word-by-word edit operations (MATCH, SUB, DEL, INS, UTT_INS) with boundary indicators."""
     chips: List[str] = []
     for step in alignment_ops:
         op = step["op"]
@@ -121,6 +172,9 @@ def render_alignment_ops_html(alignment_ops: List[Dict[str, Any]], boundary_indi
         elif op == "DEL":
             style = "background:#fff1f2; border:2px dashed #e11d48; color:#881337;"
             label = f"DEL [{step['ref_word']} → ∅] (ref#{attr_idx}{b_icon})"
+        elif op == "UTT_INS":
+            style = "background:#f5f3ff; border:2px solid #8b5cf6; color:#5b21b6;"
+            label = f"UTT_INS [+ {step['hyp_word']}] (empty-ref)"
         else:  # INS
             style = "background:#f5f3ff; border:2px solid #8b5cf6; color:#5b21b6;"
             label = f"INS [+ {step['hyp_word']}] (attr→ref#{attr_idx}{b_icon})"
@@ -138,40 +192,33 @@ def _fmt_metric_card(m: Dict[str, Any]) -> str:
     return f"{float(m['rate']) * 100.0:.2f}% ({m['errors']}/{m['words']})"
 
 
+def _fmt_row(m: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "WER": _fmt_metric_card(m),
+        "Errors": m.get("errors", 0),
+        "Words": m.get("words", 0),
+        "S / D / I": f"{m.get('substitutions', 0)} / {m.get('deletions', 0)} / {m.get('insertions', 0)}",
+    }
+
+
 def main() -> None:
     st.title("🎙️ SwitchBoard — Hindi–English Code-Switching ASR & Boundary Error Analysis")
     st.caption(
-        "Comparing Baseline Whisper Small vs. PEFT LoRA + Auxiliary Language Identification (LID) Fine-Tuning "
-        "at Hindi–English (`HI → EN` and `EN → HI`) Language Switch Boundaries"
+        "Comparing Pretrained Baseline Whisper Small (`openai/whisper-small`) vs. PEFT LoRA + Auxiliary Language "
+        "Identification (LID) Fine-Tuning at Hindi–English (`HI → EN` and `EN → HI`) Language Switch Boundaries"
     )
 
-    records, real_records = ensure_demo_assets()
-    test_records = [r for r in records if r.split == "test"]
+    demo_records, real_records = ensure_app_assets()
+    demo_test_records = [r for r in demo_records if r.split == "test"]
     real_test_records = [r for r in real_records if r.split == "test"]
+    saved_real_preds = load_saved_real_predictions()
     normalizer = get_normalizer()
-
-    # Load saved real MUCS 2021 per-utterance hypotheses if available
-    real_base_hyps: Dict[str, Tuple[str, float]] = {}
-    real_ft_hyps: Dict[str, Tuple[str, float]] = {}
-    full_bench_dir = PROJECT_ROOT / "outputs" / "full_benchmark"
-    base_utt_jsonl = full_bench_dir / "whisper_small_baseline_per_utterance.jsonl"
-    ft_utt_jsonl = full_bench_dir / "whisper_small_lora_plus_lid_per_utterance.jsonl"
-    if base_utt_jsonl.exists():
-        for line in base_utt_jsonl.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                d = json.loads(line)
-                real_base_hyps[d["utterance_id"]] = (d["raw_hypothesis"], float(d.get("transcription_time_sec") or 0.45))
-    if ft_utt_jsonl.exists():
-        for line in ft_utt_jsonl.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                d = json.loads(line)
-                real_ft_hyps[d["utterance_id"]] = (d["raw_hypothesis"], float(d.get("transcription_time_sec") or 0.46))
 
     tab_live, tab_bench, tab_docs = st.tabs(
         [
             "🔍 1. Interactive Demo & Switch-Boundary Inspector",
             "📊 2. Saved Benchmark Results & Error Analysis",
-            "📖 3. Annotation Sheet, Normalization & Walkthrough",
+            "📖 3. Dataset, Provenance & Annotation Guidelines",
         ]
     )
 
@@ -183,7 +230,7 @@ def main() -> None:
         with col_src:
             st.subheader("Step 1: Select Audio Source")
             source_options = [
-                "Real MUCS 2021 Hindi–English Corpus (517 Held-Out Test Utterances)",
+                "Real MUCS 2021 Held-Out Test Utterances (Real Whisper Predictions)",
                 "Bundled Hinglish Examples (Ready-to-Try Demo Fixture)",
                 "Upload Audio File (.wav, .mp3, .flac)",
                 "Record via Microphone",
@@ -199,22 +246,27 @@ def main() -> None:
             )
 
         with col_cfg:
-            st.subheader("Checkpoint & Availability Settings")
-            smoke_ckpt_dir = PROJECT_ROOT / "outputs" / "smoke_checkpoints" / "lora_plus_lid"
-            full_ckpt_dir = PROJECT_ROOT / "outputs" / "full_checkpoints" / "whisper_small_lora_plus_lid"
+            st.subheader("Checkpoint & Inference Settings")
+            lora_lid_cpu_dir = PROJECT_ROOT / "checkpoints" / "whisper_small_lora_plus_lid_cpu"
+            lora_only_cpu_dir = PROJECT_ROOT / "checkpoints" / "whisper_small_lora_only_cpu"
+            lora_lid_dir = PROJECT_ROOT / "checkpoints" / "whisper_small_lora_plus_lid"
+            lora_only_dir = PROJECT_ROOT / "checkpoints" / "whisper_small_lora_only"
+            colab_full_dir = PROJECT_ROOT / "checkpoints" / "colab_full_whisper_small_lora_plus_lid"
 
             ckpt_choice = st.selectbox(
                 "Fine-Tuned Whisper Checkpoint:",
                 options=[
-                    "Demo / Smoke-Test Fine-Tuned Adapter (LoRA + LID Head)",
-                    "Full Research Corpus Checkpoint (outputs/full_checkpoints/whisper_small_lora_plus_lid)",
-                    "Simulate Fine-Tuned Checkpoint Unavailable (Test Graceful Fallback)",
+                    "Whisper Small + LoRA + LID Head (CPU Exploratory — checkpoints/whisper_small_lora_plus_lid_cpu)",
+                    "Whisper Small + LoRA Only (CPU Exploratory — checkpoints/whisper_small_lora_only_cpu)",
+                    "Whisper Small + LoRA + LID Head (6-Step Smoke — checkpoints/whisper_small_lora_plus_lid)",
+                    "Whisper Small + LoRA Only (6-Step Smoke — checkpoints/whisper_small_lora_only)",
+                    "Full Colab GPU Checkpoint (checkpoints/colab_full_whisper_small_lora_plus_lid)",
+                    "Simulate Fine-Tuned Checkpoint Unavailable (Test Missing-Checkpoint Warning)",
                 ],
             )
-            run_live_hf = st.checkbox(
-                "Run Live Neural Inference on Audio (loads PyTorch model weights)",
-                value=False,
-                help="When unchecked, bundled examples use pre-recorded benchmark hypotheses for instant inspection; check to execute live PyTorch forward pass.",
+            run_live_inference_btn = st.button(
+                "⚡ Run Live PyTorch Transcription on Active Audio",
+                help="Executes a live forward pass through `openai/whisper-small` and the selected PEFT checkpoint on the active audio file.",
             )
 
         selected_audio_path: Optional[Path] = None
@@ -222,33 +274,37 @@ def main() -> None:
         default_tags = ["HI", "EN", "HI", "HI", "HI", "EN", "EN", "HI", "HI"]
         selected_utt_id = "demo_test_utt_01"
         active_duration_sec = 3.26
+        using_simulated_example = False
 
-        # Precomputed demo hypotheses for the bundled examples
-        bundled_baseline_hyps = {
-            "demo_test_utt_01": ("kal eating ke baad main report submit dunga", 0.42),
-            "demo_test_utt_02": ("aaj meeting ke baad main report sabhi kar dunga", 0.44),
-            "demo_test_utt_03": ("Rahul umm kal off time par mail bhej देना", 0.41),
-            "demo_test_utt_04": ("abhi court branch review aur model train shuru karo", 0.43),
-            "demo_test_utt_05": ("हम्म कल सब लोग सुबह जल्दी आएंगे", 0.35),
-        }
-        bundled_finetuned_hyps = {
-            "demo_test_utt_01": ("kal meeting ke baad main report submit kar dunga", 0.46),
-            "demo_test_utt_02": ("आज मीटिंग के बाद मैं रिपोर्ट सबमिट कर दूंगा", 0.47),
-            "demo_test_utt_03": ("Rahul umm kal office time par email bhej देना", 0.45),
-            "demo_test_utt_04": ("abhi code branch review aur model training shuru karo", 0.47),
-            "demo_test_utt_05": ("हम्म कल सब लोग सुबह जल्दी आएंगे", 0.38),
-        }
+        # Find saved real baseline & fine-tuned predictions if available
+        base_saved_map = saved_real_preds.get("openai_whisper-small_(baseline)", {})
+        ft_lid_saved_map = (
+            saved_real_preds.get("whisper-small_+_lora_+_lid_head_(cpu_exploratory)")
+            or saved_real_preds.get("whisper-small_+_lora_+_lid_head_(6-step_smoke)")
+            or saved_real_preds.get("whisper-small_+_lora_+_lid_head", {})
+        )
+        ft_only_saved_map = (
+            saved_real_preds.get("whisper-small_+_lora_only_(cpu_exploratory)")
+            or saved_real_preds.get("whisper-small_+_lora_only_(6-step_smoke)")
+            or saved_real_preds.get("whisper-small_+_lora_only", {})
+        )
 
         if "Real MUCS 2021" in input_mode and real_test_records:
-            # Show code-switched real MUCS 2021 utterances first
-            cs_real = [r for r in real_test_records if ("HI" in r.lang_tags and "EN" in r.lang_tags)][:60]
-            display_pool = cs_real if cs_real else real_test_records[:60]
+            # Put utterances that have saved real Whisper predictions at the top of the selector
+            evaluated_ids = set(base_saved_map.keys())
+            eval_pool = [r for r in real_test_records if r.utterance_id in evaluated_ids]
+            other_cs_pool = [
+                r for r in real_test_records
+                if r.utterance_id not in evaluated_ids and ("HI" in r.lang_tags and "EN" in r.lang_tags)
+            ][:40]
+            display_pool = eval_pool + other_cs_pool if (eval_pool or other_cs_pool) else real_test_records[:50]
+
             utt_options = {
-                f"{r.utterance_id} [{r.speaker_id}]: \"{r.transcript[:80]}\" ({r.duration_sec}s)": r
+                f"{'✅ [EVALUATED] ' if r.utterance_id in evaluated_ids else ''}{r.utterance_id} [{r.speaker_id}]: \"{r.transcript[:75]}\" ({r.duration_sec}s)": r
                 for r in display_pool
             }
             chosen_label = st.selectbox(
-                f"Choose from {len(real_test_records)} real MUCS 2021 held-out test utterances (showing top {len(display_pool)} code-switched segments):",
+                f"Choose a real MUCS 2021 held-out test utterance ({len(eval_pool)} pre-evaluated with real Whisper Small):",
                 list(utt_options.keys()),
                 index=0,
             )
@@ -258,16 +314,12 @@ def main() -> None:
             default_ref_text = chosen_rec.transcript
             default_tags = list(chosen_rec.lang_tags)
             active_duration_sec = float(chosen_rec.duration_sec or 4.0)
-            if selected_utt_id in real_base_hyps:
-                bundled_baseline_hyps[selected_utt_id] = real_base_hyps[selected_utt_id]
-            if selected_utt_id in real_ft_hyps:
-                bundled_finetuned_hyps[selected_utt_id] = real_ft_hyps[selected_utt_id]
 
         elif "Bundled Hinglish Examples" in input_mode:
             utt_options = {
-                f"{r.utterance_id}: \"{r.transcript}\" ({r.accent})": r for r in test_records
+                f"{r.utterance_id}: \"{r.transcript}\" ({r.accent})": r for r in demo_test_records
             }
-            chosen_label = st.selectbox("Choose a bundled Hinglish test utterance:", list(utt_options.keys()), index=0)
+            chosen_label = st.selectbox("Choose a bundled Hinglish demo utterance:", list(utt_options.keys()), index=0)
             chosen_rec = utt_options[chosen_label]
             selected_utt_id = chosen_rec.utterance_id
             selected_audio_path = PROJECT_ROOT / chosen_rec.audio_path
@@ -275,8 +327,11 @@ def main() -> None:
             default_tags = list(chosen_rec.lang_tags)
             active_duration_sec = float(chosen_rec.duration_sec or 3.2)
 
-        elif input_mode == "Upload Audio File (.wav, .mp3, .flac)":
-            uploaded = st.file_uploader("Upload a Hindi–English audio file (auto-resampled to 16 kHz mono)", type=["wav", "mp3", "flac", "ogg"])
+        elif "Upload Audio File" in input_mode:
+            uploaded = st.file_uploader(
+                "Upload a Hindi–English audio file (auto-resampled to 16 kHz mono)",
+                type=["wav", "mp3", "flac", "ogg"],
+            )
             if uploaded is not None:
                 tmp_dir = Path(tempfile.gettempdir()) / "switchboard_uploads"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -289,7 +344,7 @@ def main() -> None:
                 active_duration_sec = dur
                 st.success(f"Uploaded and resampled to 16 kHz mono WAV ({dur:.2f}s).")
             else:
-                st.info("Upload an audio file above, or switch to 'Bundled Hinglish Examples' to explore immediately.")
+                st.info("Upload an audio file above, or click 'Run Live PyTorch Transcription' once uploaded.")
 
         else:  # Record via Microphone
             mic_audio = st.audio_input("Click the microphone icon to record a Hindi–English sentence:")
@@ -307,60 +362,121 @@ def main() -> None:
             else:
                 st.info("Record through your browser microphone above (requires browser microphone permission).")
 
-        # Audio Player
         if selected_audio_path is not None and selected_audio_path.exists():
             st.audio(str(selected_audio_path), format="audio/wav")
 
-        # Determine Fine-Tuned checkpoint availability
-        finetuned_available = True
-        finetuned_unavail_reason = ""
+        # Validate selected Fine-Tuned checkpoint availability
         if "Simulate Fine-Tuned Checkpoint Unavailable" in ckpt_choice:
+            active_ft_dir = None
             finetuned_available = False
             finetuned_unavail_reason = (
-                "Simulated Unavailable State: Fine-tuned checkpoint disabled by user toggle. "
-                "Baseline Whisper transcription remains fully operational."
+                "Simulated Missing Checkpoint: Fine-tuned checkpoint disabled by user selection. "
+                "Baseline Whisper Small (`openai/whisper-small`) remains fully functional."
             )
-        elif "Full Research Corpus Checkpoint" in ckpt_choice and not (full_ckpt_dir / "lora_adapter").exists():
-            finetuned_available = False
-            finetuned_unavail_reason = (
-                f"Full-corpus checkpoint not found at `{full_ckpt_dir}`. "
-                f"Run `python -m switchboard.cli train --config configs/train_colab_full_lora_lid.yaml` on a GPU to generate it, "
-                f"or select the Demo / Smoke-Test Fine-Tuned Adapter. Baseline transcription remains usable."
-            )
+        elif "whisper_small_lora_plus_lid_cpu" in ckpt_choice:
+            active_ft_dir = lora_lid_cpu_dir
+            finetuned_available, finetuned_unavail_reason = check_peft_checkpoint_valid(lora_lid_cpu_dir)
+            if not finetuned_available and check_peft_checkpoint_valid(lora_lid_dir)[0]:
+                active_ft_dir = lora_lid_dir
+                finetuned_available, finetuned_unavail_reason = check_peft_checkpoint_valid(lora_lid_dir)
+        elif "whisper_small_lora_only_cpu" in ckpt_choice:
+            active_ft_dir = lora_only_cpu_dir
+            finetuned_available, finetuned_unavail_reason = check_peft_checkpoint_valid(lora_only_cpu_dir)
+            if not finetuned_available and check_peft_checkpoint_valid(lora_only_dir)[0]:
+                active_ft_dir = lora_only_dir
+                finetuned_available, finetuned_unavail_reason = check_peft_checkpoint_valid(lora_only_dir)
+        elif "whisper_small_lora_only" in ckpt_choice:
+            active_ft_dir = lora_only_dir
+            finetuned_available, finetuned_unavail_reason = check_peft_checkpoint_valid(lora_only_dir)
+        elif "Full Colab GPU" in ckpt_choice:
+            active_ft_dir = colab_full_dir
+            finetuned_available, finetuned_unavail_reason = check_peft_checkpoint_valid(colab_full_dir)
+        else:
+            active_ft_dir = lora_lid_dir
+            finetuned_available, finetuned_unavail_reason = check_peft_checkpoint_valid(lora_lid_dir)
 
-        # Obtain Baseline & Fine-Tuned Transcripts
+        # Resolve transcripts:
+        # 1. If user clicked "Run Live PyTorch Transcription" (or uploaded/recorded audio), run live `openai/whisper-small`
+        # 2. Else if selected_utt_id is in `saved_real_preds`, load the actual recorded Whisper Small & PEFT outputs
+        # 3. Else if in Bundled Demo Fixture mode, show the classroom simulation example with an explicit SIMULATED warning banner
         baseline_hyp = ""
-        baseline_time = 0.42
+        baseline_time = 0.0
+        baseline_source_badge = ""
         finetuned_hyp: Optional[str] = None
         finetuned_time: Optional[float] = None
+        finetuned_source_badge = ""
 
-        if selected_audio_path is not None and selected_audio_path.exists():
-            if run_live_hf and smoke_ckpt_dir.exists():
-                try:
-                    from switchboard.models.runners import WhisperPeftRunner
+        should_run_live = run_live_inference_btn or (
+            selected_audio_path is not None
+            and selected_audio_path.exists()
+            and ("Upload Audio" in input_mode or "Record via Microphone" in input_mode)
+        )
 
-                    peft_runner = WhisperPeftRunner(adapter_dir=smoke_ckpt_dir)
-                    out_ft = peft_runner.transcribe_file(selected_audio_path, utterance_id=selected_utt_id)
-                    if not out_ft.hypothesis.strip():
-                        out_ft.hypothesis = bundled_finetuned_hyps.get(selected_utt_id, (default_ref_text, 0.45))[0]
-                    finetuned_hyp = out_ft.hypothesis
-                    finetuned_time = out_ft.transcription_time_sec
-                except Exception as exc:
-                    st.warning(f"Live smoke-checkpoint notice: {exc}")
+        if should_run_live and selected_audio_path is not None and selected_audio_path.exists():
+            with st.spinner("Running real PyTorch transcription with `openai/whisper-small`..."):
+                base_runner = get_cached_whisper_baseline_runner("openai/whisper-small")
+                out_b = base_runner.transcribe_file(selected_audio_path, utterance_id=selected_utt_id)
+                baseline_hyp = out_b.hypothesis
+                baseline_time = out_b.transcription_time_sec
+                baseline_source_badge = "✅ REAL LIVE PYTORCH INFERENCE (`openai/whisper-small`)"
 
-            if not baseline_hyp:
-                if selected_utt_id in bundled_baseline_hyps:
-                    baseline_hyp, baseline_time = bundled_baseline_hyps[selected_utt_id]
-                else:
-                    baseline_hyp = "kal eating ke baad main report submit dunga"
-                    baseline_time = 0.42
+                if finetuned_available and active_ft_dir is not None:
+                    try:
+                        ft_runner = get_cached_whisper_peft_runner(str(active_ft_dir))
+                        out_f = ft_runner.transcribe_file(selected_audio_path, utterance_id=selected_utt_id)
+                        finetuned_hyp = out_f.hypothesis
+                        finetuned_time = out_f.transcription_time_sec
+                        finetuned_source_badge = f"✅ REAL LIVE PYTORCH INFERENCE (`{active_ft_dir.name}`)"
+                    except Exception as exc:
+                        finetuned_available = False
+                        finetuned_unavail_reason = f"Fine-tuned checkpoint error: {exc}"
 
-            if finetuned_available and finetuned_hyp is None:
-                if selected_utt_id in bundled_finetuned_hyps:
-                    finetuned_hyp, finetuned_time = bundled_finetuned_hyps[selected_utt_id]
-                else:
-                    finetuned_hyp = default_ref_text
-                    finetuned_time = 0.45
+        elif selected_utt_id in base_saved_map:
+            b_entry = base_saved_map[selected_utt_id]
+            baseline_hyp = b_entry["raw_hypothesis"]
+            baseline_time = float(b_entry.get("transcription_time_sec") or 1.5)
+            baseline_source_badge = "✅ REAL SAVED WHISPER SMALL PREDICTION (`outputs/full_benchmark_real`)"
+
+            active_ft_map = ft_only_saved_map if ("LoRA Only" in ckpt_choice) else ft_lid_saved_map
+            if finetuned_available and selected_utt_id in active_ft_map:
+                f_entry = active_ft_map[selected_utt_id]
+                finetuned_hyp = f_entry["raw_hypothesis"]
+                finetuned_time = float(f_entry.get("transcription_time_sec") or 1.6)
+                finetuned_source_badge = "✅ REAL SAVED PEFT CHECKPOINT PREDICTION (`outputs/full_benchmark_real`)"
+            elif finetuned_available and active_ft_dir is not None and selected_audio_path is not None:
+                # Utterance not in pre-saved map for this checkpoint; prompt user to click live inference
+                finetuned_hyp = None
+                finetuned_source_badge = "Click '⚡ Run Live PyTorch Transcription' above to transcribe this utterance with the selected checkpoint."
+
+        elif "Bundled Hinglish Examples" in input_mode:
+            using_simulated_example = True
+            sim_base_map = {
+                "demo_test_utt_01": ("kal eating ke baad main report submit dunga", 0.42),
+                "demo_test_utt_02": ("aaj meeting ke baad main report sabhi kar dunga", 0.44),
+                "demo_test_utt_03": ("Rahul umm kal off time par mail bhej देना", 0.41),
+                "demo_test_utt_04": ("abhi court branch review aur model train shuru karo", 0.43),
+                "demo_test_utt_05": ("हम्म कल सब लोग सुबह जल्दी आएंगे", 0.35),
+            }
+            sim_ft_map = {
+                "demo_test_utt_01": ("kal meeting ke baad main report submit kar dunga", 0.46),
+                "demo_test_utt_02": ("आज मीटिंग के बाद मैं रिपोर्ट सबमिट कर दूंगा", 0.47),
+                "demo_test_utt_03": ("Rahul umm kal office time par email bhej देना", 0.45),
+                "demo_test_utt_04": ("abhi code branch review aur model training shuru karo", 0.47),
+                "demo_test_utt_05": ("हम्म कल सब लोग सुबह जल्दी आएंगे", 0.38),
+            }
+            baseline_hyp, baseline_time = sim_base_map.get(selected_utt_id, (default_ref_text, 0.42))
+            baseline_source_badge = "⚠️ SIMULATED CLASSROOM DEMO HYPOTHESIS (Not real ASR output)"
+            if finetuned_available:
+                finetuned_hyp, finetuned_time = sim_ft_map.get(selected_utt_id, (default_ref_text, 0.45))
+                finetuned_source_badge = "⚠️ SIMULATED CLASSROOM DEMO HYPOTHESIS (Not real ASR output)"
+
+        if using_simulated_example:
+            st.warning(
+                "🚨 **SIMULATED DATA — NOT REAL MODEL RESULTS:** You are viewing the **Bundled Classroom Demo Fixture**, "
+                "which uses synthetic harmonic audio and scripted example hypotheses to illustrate switch-boundary edit "
+                "attribution (`kal meeting ke baad...`). For actual neural ASR predictions from `openai/whisper-small`, "
+                "select **Real MUCS 2021 Held-Out Test Utterances** or click **⚡ Run Live PyTorch Transcription**."
+            )
 
         st.divider()
         st.subheader("Step 2: Side-by-Side ASR Output Comparison")
@@ -368,9 +484,11 @@ def main() -> None:
         col_base, col_ft = st.columns(2)
         with col_base:
             st.markdown("#### 🟦 Primary Baseline: `openai/whisper-small`")
-            if selected_audio_path is not None:
+            if baseline_source_badge:
+                st.caption(baseline_source_badge)
+            if selected_audio_path is not None and (baseline_hyp or should_run_live):
                 base_edited = st.text_area(
-                    "Baseline Whisper Transcript (editable to test custom errors):",
+                    "Baseline Whisper Transcript (editable to inspect custom error scenarios):",
                     value=baseline_hyp,
                     height=85,
                     key=f"base_hyp_{selected_utt_id}",
@@ -383,80 +501,111 @@ def main() -> None:
                 )
             else:
                 base_edited = ""
-                st.info("Select, upload, or record audio above to view baseline transcription.")
+                st.info("Click **⚡ Run Live PyTorch Transcription on Active Audio** above to transcribe this utterance with `openai/whisper-small`.")
 
         with col_ft:
-            st.markdown("#### 🟩 Fine-Tuned: `Whisper Small + PEFT LoRA + Auxiliary LID Head`")
+            st.markdown("#### 🟩 Fine-Tuned: `Whisper Small + PEFT LoRA (+ Auxiliary LID Head)`")
             if not finetuned_available:
                 st.warning(f"⚠️ **Fine-Tuned Checkpoint Unavailable:** {finetuned_unavail_reason}")
                 ft_edited = None
             elif selected_audio_path is not None and finetuned_hyp is not None:
+                if finetuned_source_badge:
+                    st.caption(finetuned_source_badge)
                 ft_edited = st.text_area(
-                    "Fine-Tuned Whisper Transcript (editable to test custom errors):",
+                    "Fine-Tuned Whisper Transcript (editable to inspect custom error scenarios):",
                     value=finetuned_hyp,
                     height=85,
-                    key=f"ft_hyp_{selected_utt_id}",
+                    key=f"ft_hyp_{selected_utt_id}_{ckpt_choice[:18]}",
                 )
                 norm_ft = normalizer.normalize_text(ft_edited)
                 st.markdown(f"**Normalized Fine-Tuned:** `{norm_ft}`")
                 ft_t = finetuned_time or 0.45
                 st.caption(
-                    f"Checkpoint: `LoRA (decoder attn) + LID Head (λ=0.30)` | "
+                    f"Checkpoint: `{active_ft_dir.name if active_ft_dir else 'PEFT'}` | "
                     f"Time: `{ft_t:.3f}s` | RTF: `{ft_t / max(0.1, active_duration_sec):.3f}`"
                 )
             else:
                 ft_edited = None
-                st.info("Select, upload, or record audio above to view fine-tuned transcription.")
+                st.info(finetuned_source_badge or "Click **⚡ Run Live PyTorch Transcription** above to run the fine-tuned checkpoint.")
 
         st.divider()
-        st.subheader("Step 3: Reference Transcript & Word-Level Language Tag Review (`HI`, `EN`, `OTHER`)")
+        st.subheader("Step 3: Reference Transcript & Editable Word-Level Language Tags (`HI`, `EN`, `OTHER`)")
 
         ref_text_input = st.text_input(
-            "Enter or edit the reference transcript (Roman or Devanagari script):",
+            "Reference Transcript (Roman or Devanagari script):",
             value=default_ref_text,
             key=f"ref_input_{selected_utt_id}",
         )
         ref_words = ref_text_input.strip().split()
 
         if ref_words:
-            # Align tag list length with edited reference words
-            current_tags: List[str] = []
+            # Build initial tag list matching reference word count
+            initial_tags: List[str] = []
             for idx, w in enumerate(ref_words):
                 if ref_text_input.strip() == default_ref_text.strip() and idx < len(default_tags):
-                    current_tags.append(default_tags[idx])
+                    initial_tags.append(default_tags[idx])
                 else:
-                    current_tags.append(infer_word_tag(w, default_corpus_lang="HI"))
+                    initial_tags.append(infer_word_tag(w, default_corpus_lang="HI"))
 
-            tag_df = pd.DataFrame(
-                {
-                    "word_index": list(range(len(ref_words))),
-                    "reference_word": ref_words,
-                    "normalized_word": [normalizer.normalize_word(w) for w in ref_words],
-                    "lang_tag": current_tags,
-                }
+            # Standard HTML DOM text input & per-word selectboxes (replaces canvas-only grid so tag editing always works!)
+            tags_str_input = st.text_input(
+                "Edit Space-Separated Word-Level Language Tags (`HI`, `EN`, `OTHER` — 1 tag per reference word):",
+                value=" ".join(initial_tags),
+                key=f"tags_str_{selected_utt_id}_{len(ref_words)}",
+                help="Modify any tag directly here (e.g., change HI to EN or OTHER) or use the per-word dropdowns below.",
             )
+            parsed_str_tags = [
+                t.upper() if t.upper() in {"HI", "EN", "OTHER"} else "OTHER"
+                for t in tags_str_input.strip().split()
+            ]
+            while len(parsed_str_tags) < len(ref_words):
+                parsed_str_tags.append(initial_tags[len(parsed_str_tags)])
+            parsed_str_tags = parsed_str_tags[: len(ref_words)]
 
-            st.caption("Review or modify word-level `HI`, `EN`, or `OTHER` tags below (script alone does not determine language):")
-            edited_tag_df = st.data_editor(
-                tag_df,
-                column_config={
-                    "word_index": st.column_config.NumberColumn("Index", disabled=True),
-                    "reference_word": st.column_config.TextColumn("Raw Reference Word", disabled=True),
-                    "normalized_word": st.column_config.TextColumn("Normalized Form", disabled=True),
-                    "lang_tag": st.column_config.SelectboxColumn(
-                        "Reviewed Language Tag",
-                        options=["HI", "EN", "OTHER"],
-                        required=True,
-                    ),
-                },
-                hide_index=True,
-                use_container_width=True,
-                key=f"tag_editor_{selected_utt_id}_{len(ref_words)}",
-            )
+            with st.expander("🔧 Click to Edit Individual Word Tags via Dropdown Selectors", expanded=True):
+                cols_per_row = min(6, max(1, len(ref_words)))
+                reviewed_tags: List[str] = []
+                for row_start in range(0, len(ref_words), cols_per_row):
+                    row_cols = st.columns(cols_per_row)
+                    for offset in range(cols_per_row):
+                        w_idx = row_start + offset
+                        if w_idx >= len(ref_words):
+                            break
+                        w_surface = ref_words[w_idx]
+                        curr_t = parsed_str_tags[w_idx]
+                        tag_options = ["HI", "EN", "OTHER"]
+                        chosen_t = row_cols[offset].selectbox(
+                            f"#{w_idx}: {w_surface}",
+                            options=tag_options,
+                            index=tag_options.index(curr_t) if curr_t in tag_options else 0,
+                            key=f"word_tag_sel_{selected_utt_id}_{w_idx}_{curr_t}",
+                        )
+                        reviewed_tags.append(chosen_t)
 
-            reviewed_tags = [str(t).upper() for t in edited_tag_df["lang_tag"].tolist()]
+            b_preview = detect_switch_boundaries(ref_words, reviewed_tags)
+            tag_summary_rows = []
+            for idx, (w, t) in enumerate(zip(ref_words, reviewed_tags)):
+                if idx in b_preview.overlapping_boundary_indices:
+                    role = "⚡⇄ Overlapping 2x-Switch Boundary (counted once)"
+                elif idx in b_preview.before_switch_indices and idx in b_preview.after_switch_indices:
+                    role = "⚡⇄ Overlapping 2x-Switch Boundary"
+                elif idx in b_preview.before_switch_indices:
+                    role = "⚡ Before Switch (Pre-Switch)"
+                elif idx in b_preview.after_switch_indices:
+                    role = "⚡ After Switch (Post-Switch)"
+                else:
+                    role = "Non-Boundary"
+                tag_summary_rows.append(
+                    {
+                        "Index": idx,
+                        "Raw Word": w,
+                        "Normalized Word": normalizer.normalize_word(w),
+                        "Reviewed Tag": t,
+                        "Boundary Role": role,
+                    }
+                )
+            st.dataframe(pd.DataFrame(tag_summary_rows), use_container_width=True, hide_index=True)
 
-            # Highlight switch-adjacent words
             st.markdown("##### ⚡ Switch-Boundary Word Highlighting (`HI → EN` and `EN → HI`)")
             st.markdown(
                 render_boundary_highlighted_html(ref_words, reviewed_tags),
@@ -535,36 +684,41 @@ def main() -> None:
     with tab_bench:
         st.subheader("Saved Benchmark Evaluation Results")
         tier_choice = st.radio(
-            "Select Benchmark Result Tier (Demo/Smoke results are kept strictly separate from Full Research results):",
+            "Select Result Tier (Real Research Measurements, Smoke-Test Runs, and Classroom Simulations are strictly isolated):",
             options=[
-                "Full Research Corpus Benchmark (outputs/full_benchmark) — [REAL MUCS 2021 CORPUS: 517 Held-Out Test Utterances]",
-                "Demo Fixture Benchmark (outputs/demo_evaluation) — [DEMO FIXTURE: 5 Test Utterances]",
-                "Live Smoke-Test Evaluation (outputs/live_evaluation) — [SMOKE TEST]",
+                "Real Model Benchmark Results (outputs/full_benchmark_real) — [REAL MODEL MEASUREMENTS]",
+                "Smoke-Test Verification Results (outputs/smoke_test) — [SMOKE TEST ONLY]",
+                "Classroom Demo Fixture (outputs/demo) — [SIMULATED DATA — NOT REAL MODEL RESULTS]",
             ],
             horizontal=False,
         )
 
-        if "outputs/demo_evaluation" in tier_choice:
-            active_eval_dir = PROJECT_ROOT / "outputs" / "demo_evaluation"
-            st.info(
-                "🏷️ **TIER: DEMO FIXTURE** — Results below are computed on the self-contained 5-utterance test split "
-                "in `data/demo_fixture/manifest.jsonl` (`outputs/demo_evaluation/`)."
-            )
-        elif "outputs/live_evaluation" in tier_choice:
-            active_eval_dir = PROJECT_ROOT / "outputs" / "live_evaluation"
-            st.info("🏷️ **TIER: SMOKE TEST** — Results from local smoke-test checkpoint evaluation.")
-        else:
-            active_eval_dir = PROJECT_ROOT / "outputs" / "full_benchmark"
+        if "outputs/full_benchmark_real" in tier_choice:
+            active_eval_dir = PROJECT_ROOT / "outputs" / "full_benchmark_real"
             if (active_eval_dir / "all_models_summary.json").exists():
-                st.info(
-                    "🏷️ **TIER: FULL RESEARCH BENCHMARK** — saved results from `outputs/full_benchmark/` "
-                    "(real MUCS 2021 held-out test split)."
+                st.success(
+                    "✅ **REAL MODEL BENCHMARK RESULTS (`outputs/full_benchmark_real/`)** — Every transcript and metric "
+                    "below was produced by actual neural model execution on held-out MUCS 2021 Hindi–English test utterances. "
+                    "Zero simulated or demo records are permitted in this tier."
                 )
             else:
                 st.warning(
-                    "🏷️ **TIER: FULL RESEARCH BENCHMARK** — no results found. Generate them with "
-                    "`python -m switchboard.cli evaluate-real-mucs`."
+                    "⏳ **Real Model Benchmark Currently Running or Not Yet Generated** — Run "
+                    "`python -m switchboard.cli evaluate-real-benchmark --max-utterances 20` to populate `outputs/full_benchmark_real/`."
                 )
+        elif "outputs/smoke_test" in tier_choice:
+            active_eval_dir = PROJECT_ROOT / "outputs" / "smoke_test"
+            st.info(
+                "🧪 **SMOKE TEST TIER (`outputs/smoke_test/`)** — Short pipeline verification outputs. "
+                "Do not cite smoke-test runs as full research conclusions."
+            )
+        else:
+            active_eval_dir = PROJECT_ROOT / "outputs" / "demo"
+            st.error(
+                "🚨 **SIMULATED DATA — NOT REAL MODEL RESULTS (`outputs/demo/`)** — This tier displays the 5-utterance "
+                "synthetic classroom demo fixture used to verify switch-boundary edit attribution by hand. "
+                "Never include these numbers in research tables."
+            )
 
         summary_json_p = active_eval_dir / "all_models_summary.json"
         if summary_json_p.exists():
@@ -574,6 +728,14 @@ def main() -> None:
 
             st.markdown("#### 1. Model Comparison Table (Same Held-Out Test Split)")
             st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+
+            eval_cfg_p = active_eval_dir / "evaluation_config.json"
+            if eval_cfg_p.exists():
+                eval_cfg = json.loads(eval_cfg_p.read_text(encoding="utf-8"))
+                skipped = eval_cfg.get("skipped_or_blocked_models", [])
+                if skipped:
+                    with st.expander("ℹ️ View Skipped or Blocked Checkpoints & Dependencies", expanded=False):
+                        st.dataframe(pd.DataFrame(skipped), use_container_width=True, hide_index=True)
 
             if aggregates:
                 model_names = [a["model_name"] for a in aggregates]
@@ -660,21 +822,42 @@ def main() -> None:
             st.warning(f"No saved benchmark file found at `{summary_json_p}`.")
 
     # =========================================================================
-    # TAB 3: ANNOTATION GUIDELINES, NORMALIZATION & CLASSROOM WALKTHROUGH
+    # TAB 3: DATASET, PROVENANCE & ANNOTATION GUIDELINES
     # =========================================================================
     with tab_docs:
-        st.subheader("Sample Reviewed Word-Level Annotation Sheet")
+        st.subheader("1. Dataset Split Summary & Provenance (`data/full_corpus/unified_manifest.jsonl`)")
+        if real_records:
+            split_summary = []
+            for sp in ["train", "val", "test"]:
+                sub = [r for r in real_records if r.split == sp]
+                spks = sorted({r.speaker_id for r in sub})
+                dur_hrs = sum(float(r.duration_sec or 0.0) for r in sub) / 3600.0
+                split_summary.append(
+                    {
+                        "Split": sp,
+                        "Utterances": len(sub),
+                        "Unique Speakers (Disjoint)": len(spks),
+                        "Duration (Hours)": round(dur_hrs, 3),
+                        "Sources": ", ".join(sorted({r.source for r in sub})),
+                        "Synthetic Records": sum(1 for r in sub if r.is_synthetic),
+                    }
+                )
+            st.dataframe(pd.DataFrame(split_summary), use_container_width=True, hide_index=True)
+            with st.expander("Inspect Sample Unified Manifest Records (Canonical Fields)", expanded=False):
+                st.json([r.to_dict() for r in real_records[:3]])
+
+        st.subheader("2. Sample Reviewed Word-Level Annotation Sheet (`docs/sample_annotation_sheet.csv`)")
         sample_csv_p = PROJECT_ROOT / "docs" / "sample_annotation_sheet.csv"
         if sample_csv_p.exists():
             st.dataframe(pd.read_csv(sample_csv_p), use_container_width=True, hide_index=True)
 
-        st.subheader("Verified Baseline & Comparison Checkpoints")
+        st.subheader("3. Verified Baseline & Comparison Checkpoints")
         reg_models = [verify_checkpoint_status(m["checkpoint_id"]) for m in list_registered_models()]
         st.dataframe(pd.DataFrame(reg_models), use_container_width=True, hide_index=True)
 
         doc_col1, doc_col2 = st.columns(2)
         with doc_col1:
-            st.markdown("#### Annotation Guidelines (`docs/ANNOTATION_GUIDELINES.md`)")
+            st.markdown("#### Annotation Guidelines (`HI`, `EN`, `OTHER`, Names, Fillers, Ambiguous Words)")
             guide_p = PROJECT_ROOT / "docs" / "ANNOTATION_GUIDELINES.md"
             if guide_p.exists():
                 with st.expander("Read Full Annotation Guidelines", expanded=False):
@@ -685,15 +868,6 @@ def main() -> None:
             if eq_p.exists():
                 with st.expander("View `configs/normalization_equivalents.yaml`", expanded=False):
                     st.code(eq_p.read_text(encoding="utf-8"), language="yaml")
-
-
-def _fmt_row(m: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "WER": _fmt_metric_card(m),
-        "Errors": m.get("errors", 0),
-        "Words": m.get("words", 0),
-        "S / D / I": f"{m.get('substitutions', 0)} / {m.get('deletions', 0)} / {m.get('insertions', 0)}",
-    }
 
 
 if __name__ == "__main__":

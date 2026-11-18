@@ -6,13 +6,17 @@ from switchboard.training.whisper_lora_lid import (
     LID_TAG_TO_ID,
     AuxiliaryLIDHead,
     CurriculumTrainingRunner,
+    LazyWhisperLIDDataset,
     align_word_tags_to_subwords,
     build_whisper_lora_lid_model,
     compute_joint_asr_lid_loss,
+    detect_cpu_hardware_info,
     filter_records_for_curriculum_stage,
     find_decoder_attention_target_modules,
     load_finetuned_whisper_lora_lid,
+    snapshot_parameter_fingerprints,
     verify_checkpoint_reload,
+    verify_parameter_updates,
 )
 
 __all__ = [
@@ -21,11 +25,15 @@ __all__ = [
     "ID_TO_LID_TAG",
     "IGNORE_INDEX",
     "LID_TAG_TO_ID",
+    "LazyWhisperLIDDataset",
     "align_word_tags_to_subwords",
     "build_whisper_lora_lid_model",
     "compute_joint_asr_lid_loss",
+    "detect_cpu_hardware_info",
     "filter_records_for_curriculum_stage",
     "find_decoder_attention_target_modules",
     "load_finetuned_whisper_lora_lid",
+    "snapshot_parameter_fingerprints",
     "verify_checkpoint_reload",
+    "verify_parameter_updates",
 ]

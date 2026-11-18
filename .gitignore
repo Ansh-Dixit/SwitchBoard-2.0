@@ -1,0 +1,79 @@
+# ==========================================
+# Project-Specific Data, Checkpoints & Outputs
+# ==========================================
+checkpoints/
+data/
+outputs/
+reports/
+
+# Model Weights & Large Data Formats
+*.npz
+*.npy
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.bin
+*.pkl
+*.joblib
+*.parquet
+*.csv
+
+# ==========================================
+# Python, Packaging & Testing
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# ==========================================
+# Jupyter Notebooks
+# ==========================================
+.ipynb_checkpoints/
+
+# ==========================================
+# Streamlit & Environment Secrets
+# ==========================================
+.streamlit/secrets.toml
+.env
+.env.*
+!.env.example
+
+# ==========================================
+# Archives & Logs
+# ==========================================
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+*.log
+logs/
+
+# ==========================================
+# macOS & Editor Files
+# ==========================================
+.DS_Store
+.AppleDouble
+.LSOverride
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

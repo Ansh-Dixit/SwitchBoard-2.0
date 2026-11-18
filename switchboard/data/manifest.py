@@ -21,7 +21,20 @@ TARGET_SAMPLE_RATE: int = 16000
 
 @dataclass
 class ManifestRecord:
-    """Single utterance record in the unified SwitchBoard manifest format."""
+    """Single utterance record in the unified SwitchBoard manifest format.
+
+    Contains all required canonical fields:
+    - utterance_id
+    - audio_path
+    - original_transcript (aliased with transcript)
+    - normalized_transcript
+    - word_level_language_tags (aliased with lang_tags)
+    - speaker_id
+    - accent
+    - source
+    - split
+    - is_synthetic (synthetic flag & provenance)
+    """
 
     utterance_id: str
     audio_path: str
@@ -31,31 +44,76 @@ class ManifestRecord:
     accent: Optional[str]
     source: str
     split: str
+    original_transcript: Optional[str] = None
+    normalized_transcript: Optional[str] = None
+    word_level_language_tags: Optional[List[str]] = None
     duration_sec: Optional[float] = None
     is_synthetic: bool = False
     audio_sha256: Optional[str] = None
     review_status: str = "reviewed"
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not self.original_transcript:
+            self.original_transcript = self.transcript
+        if not self.transcript and self.original_transcript:
+            self.transcript = self.original_transcript
+        if not self.word_level_language_tags:
+            self.word_level_language_tags = list(self.lang_tags)
+        if not self.lang_tags and self.word_level_language_tags:
+            self.lang_tags = list(self.word_level_language_tags)
+        if self.normalized_transcript is None:
+            from switchboard.normalization.normalizer import TranscriptNormalizer
+
+            self.normalized_transcript = TranscriptNormalizer().normalize_text(self.transcript)
+
     @property
     def words(self) -> List[str]:
         return self.transcript.strip().split()
 
     def to_dict(self) -> Dict[str, Any]:
-        return dataclasses.asdict(self)
+        return {
+            "utterance_id": self.utterance_id,
+            "audio_path": self.audio_path,
+            "original_transcript": self.original_transcript or self.transcript,
+            "normalized_transcript": self.normalized_transcript,
+            "word_level_language_tags": list(self.lang_tags),
+            "transcript": self.transcript,
+            "lang_tags": list(self.lang_tags),
+            "speaker_id": self.speaker_id,
+            "accent": self.accent,
+            "source": self.source,
+            "split": self.split,
+            "is_synthetic": bool(self.is_synthetic),
+            "duration_sec": self.duration_sec,
+            "audio_sha256": self.audio_sha256,
+            "review_status": self.review_status,
+            "metadata": self.metadata,
+        }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ManifestRecord":
+        transcript_val = data.get("original_transcript") or data.get("transcript") or ""
+        tags_val = data.get("word_level_language_tags") or data.get("lang_tags") or []
         known_fields = {f.name for f in dataclasses.fields(cls)}
         filtered = {k: v for k, v in data.items() if k in known_fields}
+        filtered["transcript"] = transcript_val
+        filtered["original_transcript"] = transcript_val
+        filtered["lang_tags"] = list(tags_val)
+        filtered["word_level_language_tags"] = list(tags_val)
         extra = {k: v for k, v in data.items() if k not in known_fields}
         if extra and "metadata" not in filtered:
             filtered["metadata"] = extra
         return cls(**filtered)
 
 
-def validate_record(record: ManifestRecord, check_audio_exists: bool = False, base_dir: Optional[Path] = None) -> None:
-    """Validate a single ManifestRecord for schema, word/tag counts, and synthetic split rules."""
+def validate_record(
+    record: ManifestRecord,
+    check_audio_exists: bool = False,
+    base_dir: Optional[Path] = None,
+    forbid_demo_or_synthetic_in_research: bool = False,
+) -> None:
+    """Validate a single ManifestRecord for schema, word/tag counts, and synthetic/demo split rules."""
     if not record.utterance_id or not str(record.utterance_id).strip():
         raise ValueError("utterance_id must be a non-empty string.")
     if not record.audio_path or not str(record.audio_path).strip():
@@ -91,6 +149,18 @@ def validate_record(record: ManifestRecord, check_audio_exists: bool = False, ba
             f"is only permitted in the 'train' split, but found in '{record.split}'."
         )
 
+    if forbid_demo_or_synthetic_in_research:
+        is_demo = (
+            "demo" in record.source.lower()
+            or record.utterance_id.startswith("demo_")
+            or bool(record.metadata.get("is_demo_fixture"))
+        )
+        if is_demo or is_syn:
+            raise ValueError(
+                f"[{record.utterance_id}] Demo or synthetic record (source='{record.source}', is_synthetic={is_syn}) "
+                f"is forbidden in official full_research benchmark evaluation and exports."
+            )
+
     if check_audio_exists:
         audio_p = Path(record.audio_path)
         if not audio_p.is_absolute() and base_dir is not None:
@@ -103,16 +173,9 @@ def validate_manifest_splits(
     records: Iterable[ManifestRecord],
     check_audio_exists: bool = False,
     base_dir: Optional[Path] = None,
+    forbid_demo_or_synthetic_in_research: bool = False,
 ) -> Dict[str, Any]:
-    """Validate an entire manifest collection for speaker separation, duplicate separation, and synthetic constraints.
-
-    Raises ValueError if:
-    - Any record fails `validate_record`
-    - Any utterance_id is duplicated
-    - Any speaker_id appears in more than one split (train vs val vs test)
-    - Any duplicate audio recording (by audio_sha256 or normalized audio_path) appears across multiple splits
-    - Any synthetic utterance appears outside 'train'
-    """
+    """Validate an entire manifest collection for speaker separation, duplicate separation, and synthetic constraints."""
     record_list = list(records)
     if not record_list:
         raise ValueError("Manifest contains zero records.")
@@ -124,7 +187,12 @@ def validate_manifest_splits(
     synthetic_counts: Dict[str, int] = {"train": 0, "val": 0, "test": 0}
 
     for rec in record_list:
-        validate_record(rec, check_audio_exists=check_audio_exists, base_dir=base_dir)
+        validate_record(
+            rec,
+            check_audio_exists=check_audio_exists,
+            base_dir=base_dir,
+            forbid_demo_or_synthetic_in_research=forbid_demo_or_synthetic_in_research,
+        )
         if rec.utterance_id in seen_utt_ids:
             raise ValueError(f"Duplicate utterance_id detected: '{rec.utterance_id}'")
         seen_utt_ids.add(rec.utterance_id)
@@ -135,7 +203,6 @@ def validate_manifest_splits(
 
         speaker_to_splits.setdefault(rec.speaker_id, set()).add(rec.split)
 
-        # Track duplicate recordings by audio_sha256 (if computed) and canonical audio_path
         norm_path = str(Path(rec.audio_path)).replace("\\", "/").lower()
         audio_key_to_splits.setdefault(f"path:{norm_path}", set()).add(rec.split)
         if rec.audio_sha256:
@@ -180,10 +247,8 @@ def resample_to_16k_mono(
 
     try:
         data, sr = sf.read(str(in_p), dtype="float32", always_2d=True)
-        # Average across channels to produce mono
         mono = np.mean(data, axis=1)
     except Exception:
-        # Fallback to librosa for MP3/M4A formats if soundfile backend lacks codec
         import librosa
 
         mono, sr = librosa.load(str(in_p), sr=None, mono=True)
@@ -195,7 +260,6 @@ def resample_to_16k_mono(
         down = int(sr) // gcd
         mono = resample_poly(mono, up, down).astype(np.float32)
 
-    # Peak normalize gently if clipping
     peak = float(np.max(np.abs(mono))) if mono.size > 0 else 0.0
     if peak > 0.99:
         mono = mono / peak * 0.98
@@ -226,7 +290,7 @@ def load_manifest(manifest_path: str | Path, validate: bool = True) -> List[Mani
         raise FileNotFoundError(f"Manifest file not found: {in_p}")
     records: List[ManifestRecord] = []
     with in_p.open("r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, start=1):
+        for line in f:
             stripped = line.strip()
             if not stripped:
                 continue

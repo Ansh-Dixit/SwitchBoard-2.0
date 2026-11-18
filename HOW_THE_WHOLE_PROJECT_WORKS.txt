@@ -19,29 +19,29 @@ struggle on code-switched speech for three specific reasons:
      transitions from a Hindi word to an English word (`HI -> EN`, e.g.,
      `"kal" -> "meeting"`) or from an English word back to Hindi (`EN -> HI`,
      e.g., `"meeting" -> "ke"`), the decoder's internal language prior frequently
-     hallucinates a same-language phonetic lookalike (e.g., transcribing
-     `"eating"` instead of `"meeting"`, or dropping `"kar"` after `"submit"`).
+     misrecognizes the boundary tokens.
   2) **Script Inconsistency (Devanagari vs. Latin):** In real Hindi–English
      corpora (such as MUCS 2021 Spoken Tutorials), English words are often
-     written in Devanagari (`"मीटिंग"`, `"क्लिक"`, `"फाइल"`, `"ट्यूटोरियल"`) in
-     some utterances and in Latin script (`"meeting"`, `"click"`, `"file"`,
-     `"tutorial"`) in others. Standard WER tools treat `"मीटिंग"` and `"meeting"`
-     as a 100% word error even though the ASR recognized the exact spoken word.
-  3) **Aggregate WER Hides Boundary Failures:** Standard overall Word Error Rate
-     (WER) averages errors across all words, masking whether fine-tuning actually
-     fixed errors at the language-switch points or merely improved easy
-     monolingual spans.
+     written in Devanagari (`"मीटिंग"`, `"क्लिक"`, `"फाइल"`, `"ट्यूटोरियल"`,
+     `"इम्प्रेस"`, `"स्लाइड"`) in some transcripts or ASR hypotheses and in Latin
+     script (`"meeting"`, `"click"`, `"file"`, `"tutorial"`, `"impress"`, `"slide"`)
+     in others. Standard WER tools treat `"इम्प्रेस"` and `"impress"` as a 100%
+     word error even when the ASR recognized the exact spoken word.
+  3) **Aggregate WER Hides Boundary Behavior:** Standard overall Word Error Rate
+     (WER) pools all words together rather than isolating recognition accuracy at
+     language-switch boundaries (`HI -> EN` and `EN -> HI`).
 
-**SwitchBoard** solves all three problems by combining:
+**SwitchBoard** solves these problems by combining:
   - A **Unified Dataset Pipeline** with reviewed word-level `HI`, `EN`, and
     `OTHER` tags and 16 kHz mono audio resampling (applied to your 3,136-utterance
-    **MUCS 2021 Hindi–English corpus** across 30 speakers).
+    **MUCS 2021 Hindi–English corpus** across 30 speaker-disjoint splits).
   - A **Cross-Script Transcript Normalizer** that preserves raw transcripts while
     canonicalizing reviewed Devanagari/Roman spelling equivalents (`"मीटिंग" <-> "meeting"`,
-    `"क्लिक" <-> "click"`) without losing reference word-to-language-tag alignment.
-  - **Parameter-Efficient Fine-Tuning (PEFT LoRA)** on Whisper decoder attention
-    layers combined with an **Auxiliary Language Identification (LID) Head** on
-    decoder hidden states and **3-Stage Curriculum Learning**.
+    `"क्लिक" <-> "click"`, `"इम्प्रेस" <-> "impress"`) without losing reference
+    word-to-language-tag alignment.
+  - **Parameter-Efficient Fine-Tuning (PEFT LoRA)** on frozen `openai/whisper-small`
+    decoder attention layers combined with an **Auxiliary Language Identification
+    (LID) Head** on decoder hidden states and **3-Stage Curriculum Learning**.
   - A **Switch-Boundary Evaluation Engine** that separates **Boundary WER**
     (words immediately before and after a language switch) from **Non-Boundary WER**
     with deterministic edit attribution and Code-Mixing Index (CMI) analysis.
@@ -53,10 +53,11 @@ Below is how every folder and Python module in `SwitchBoard` fits together:
 
 A. Dataset Preparation & Unified Manifest (`switchboard/data/`)
    - `switchboard/data/manifest.py`:
-     * Defines `ManifestRecord`, the single schema used across all datasets:
-       `utterance_id`, `audio_path`, `transcript`, `lang_tags` (`HI`, `EN`, `OTHER`),
-       `speaker_id`, `accent`, `source`, `split` (`train`, `val`, `test`),
-       `duration_sec`, `is_synthetic`, and `audio_sha256`.
+     * Defines `ManifestRecord`, containing all required canonical fields:
+       `utterance_id`, `audio_path`, `original_transcript` (and `transcript`),
+       `normalized_transcript`, `word_level_language_tags` (and `lang_tags` in
+       `{"HI", "EN", "OTHER"}`), `speaker_id`, `accent`, `source`, `split`
+       (`train`, `val`, `test`), `is_synthetic`, `duration_sec`, and `audio_sha256`.
      * `resample_to_16k_mono()`: Loads raw audio of any sample rate or channel
        count, averages channels to mono, resamples to 16,000 Hz using polyphase
        filtering (`scipy.signal.resample_poly`), saves 16-bit PCM WAV, and
@@ -67,8 +68,10 @@ A. Dataset Preparation & Unified Manifest (`switchboard/data/`)
            `val`, and `test`.
        (3) **Duplicate Recording Separation:** Zero shared audio paths or
            waveform SHA-256 hashes across splits.
-       (4) **Synthetic Speech Isolation:** Any record marked `is_synthetic=True`
-           or with `"synthetic"` in `source` is strictly restricted to `split="train"`.
+       (4) **Synthetic & Demo Isolation:** Synthetic records (`is_synthetic=True`)
+           are restricted to `split="train"`, and `forbid_demo_or_synthetic_in_research=True`
+           blocks any demo or synthetic record from entering official research
+           evaluations.
 
    - `switchboard/data/importers.py`:
      * `import_mucs2021_hi_en()`: Parses your extracted `Hindi-English_test.tar.gz`
@@ -77,16 +80,16 @@ A. Dataset Preparation & Unified Manifest (`switchboard/data/`)
        **3,136 timestamped utterance segments** (`5.19 hours` of 16 kHz mono
        audio), tags every word as `HI`, `EN`, or `OTHER` using lexical tables
        (never relying on script alone), and partitions the 30 speakers into
-       disjoint splits:
-         - `train`: 2,021 utterances (20 speakers)
+       disjoint splits in `data/full_corpus/unified_manifest.jsonl`:
+         - `train`: 2,021 utterances (20 speakers: 187 monolingual + 1,834 code-switched)
          - `val`:   598 utterances (5 speakers)
-         - `test`:  517 utterances (5 speakers: `mucs_834022`, `mucs_847066`,
-                    `mucs_918821`, `mucs_921151`, `mucs_957491`)
-     * Also includes importers for **IndicSUPERB Hindi Kathbath**
+         - `test`:  517 utterances (5 held-out speakers: `mucs_834022`,
+                    `mucs_847066`, `mucs_918821`, `mucs_921151`, `mucs_957491`)
+     * Also implements tested importers for **IndicSUPERB Hindi Kathbath**
        (`import_kathbath_hi`), **Mozilla Common Voice Hindi & English**
        (`import_common_voice`), **Local Team Consented Recordings**
-       (`import_local_team_recordings`, which enforces `consent_verified=true`),
-       and the self-contained **Demo Fixture** (`build_demo_fixture`).
+       (`import_local_team_recordings`, enforcing `consent_verified=true`),
+       and the isolated **Demo Fixture** (`build_demo_fixture` -> `data/demo/`).
 
 B. Transcript Normalization (`switchboard/normalization/normalizer.py`)
    - `TranscriptNormalizer`:
@@ -97,174 +100,116 @@ B. Transcript Normalization (`switchboard/normalization/normalizer.py`)
        (2) Lowercase folding for Latin characters.
        (3) Punctuation stripping (ASCII punctuation + Devanagari purna viram `।`
            and double danda `॥`).
-       (4) Lookup in `configs/normalization_equivalents.yaml` (containing 170+
-           reviewed cross-script and Romanized spelling equivalents such as
-           `"मीटिंग" -> "meeting"`, `"क्लिक" -> "click"`, `"बॉक्स" -> "box"`,
-           `"सेव" -> "save"`, `"फाइल" -> "file"`, `"ट्यूटोरियल" -> "tutorial"`,
+       (4) Lookup in `configs/normalization_equivalents.yaml` (190+ reviewed
+           cross-script and Romanized spelling equivalents such as
+           `"मीटिंग" -> "meeting"`, `"क्लिक" -> "click"`, `"इम्प्रेस" -> "impress"`,
+           `"नोट्स" -> "notes"`, `"स्लाइड" -> "slide"`, `"ट्यूटोरियल" -> "tutorial"`,
            `"कल" -> "kal"`, `"दूँगा" / "doonga" -> "dunga"`).
-     * `normalize_reference(transcript, lang_tags)`: Maintains a `NormalizedTokenMapping`
-       list linking each normalized word back to its `orig_index`, `raw_word`,
-       and reviewed `lang_tag` (`HI`, `EN`, `OTHER`). Pure punctuation tokens are
-       dropped cleanly with their tags so word-to-tag alignment never drifts.
-     * Because both raw and normalized transcripts are scored in `evaluate_utterance`,
-       the exact effect of normalization is visible side by side (`Raw WER` vs.
-       `Normalized WER`).
+     * `normalize_reference(transcript, lang_tags)` preserves 1-to-1 alignment
+       between each normalized reference word and its original language tag
+       (`HI`, `EN`, `OTHER`), while ensuring genuine lexical errors still count.
 
 C. Baseline & Comparison Models (`switchboard/models/`)
    - `switchboard/models/registry.py` & `switchboard/models/runners.py`:
      1) **Primary Baseline (`WhisperBaselineRunner` — `openai/whisper-small`)**:
-        * Pretrained 244M-parameter multilingual encoder-decoder (Apache-2.0).
-        * Used as the primary baseline so our before-and-after comparison uses
-          the exact same base checkpoint.
-     2) **Comparison Baseline 1 (`IndicWhisperRunner` — AI4Bharat IndicWhisper / `vasista22/whisper-hindi-small`)**:
-        * Hindi-specialized Whisper model (MIT / CC-BY-4.0).
-        * Transcribes embedded English words in Devanagari script (e.g., `"मीटिंग"`),
-          demonstrating why SwitchBoard's cross-script normalizer is essential
-          (reducing IndicWhisper's apparent error rate on MUCS 2021 from 18.99%
-          Raw WER down to 11.04% Normalized WER).
+        * Pretrained 241.7M-parameter multilingual encoder-decoder (Apache-2.0).
+        * Cached locally and used as both the primary baseline and the exact
+          pretrained base checkpoint for PEFT LoRA fine-tuning.
+     2) **Comparison Baseline 1 (`IndicWhisperRunner` — `vasista22/whisper-hindi-small`)**:
+        * AI4Bharat Vistaar / Indic-tuned Whisper Small checkpoint for Hindi
+          (MIT / CC-BY-4.0), cached locally and evaluated on the same held-out
+          MUCS 2021 test utterances.
      3) **Comparison Baseline 2 (`Wav2Vec2CTCRunner` — `facebook/wav2vec2-xls-r-300m` & `Harveenchadha/vakyansh-wav2vec2-hindi-him-4200`)**:
-        * Explicitly checks whether the checkpoint includes a trained CTC linear
-          classification head (`lm_head`) and character vocabulary.
-        * Automatically detects and reports that base `facebook/wav2vec2-xls-r-300m`
-          has `status = "requires_ctc_head_training"` (self-supervised encoder
-          only), while supporting fine-tuned `Wav2Vec2ForCTC` checkpoints.
+        * Automatically inspects checkpoint architecture and reports that base
+          `facebook/wav2vec2-xls-r-300m` is BLOCKED for direct ASR inference with
+          `status = "requires_ctc_head_training"` (self-supervised encoder
+          without a trained `lm_head` or `vocab.json`).
      4) **Fine-Tuned PEFT Runner (`WhisperPeftRunner`)**:
-        * Reloads the frozen base Whisper model + trained PEFT LoRA adapter +
-          trained Auxiliary Language Identification (LID) head, outputting both
-          the decoded transcript and subword-level language predictions.
+        * Loads frozen `openai/whisper-small` + trained PEFT LoRA adapter +
+          optional Auxiliary Language Identification (LID) head. Includes an
+          explicit guardrail rejecting any unit-test tiny fallback checkpoint.
 
 D. Whisper Small Fine-Tuning: LoRA + Auxiliary LID Head + Curriculum Learning
    (`switchboard/training/whisper_lora_lid.py`)
    1) **Freezing Base Whisper & Targeting Decoder Attention with PEFT LoRA**:
-      - All pretrained Whisper weights are frozen (`param.requires_grad = False`).
-      - `find_decoder_attention_target_modules()` selects **only** the linear
-        attention projections inside the Whisper **decoder** (`self_attn` and
-        `encoder_attn` `q_proj`, `k_proj`, `v_proj`, `out_proj`), leaving the
-        acoustic encoder 100% frozen.
-      - Trainable parameters represent `< 0.52%` of the model.
-
+      - All pretrained `openai/whisper-small` weights (`241,734,912` params) are
+        frozen (`param.requires_grad = False`).
+      - `find_decoder_attention_target_modules()` injects LoRA adapters
+        (`1,179,648` trainable params for `r=8`, `< 0.5%` of total params)
+        exclusively into the decoder self-attention and cross-attention linear
+        projections (`q_proj`, `k_proj`, `v_proj`, `out_proj`).
    2) **Auxiliary Language Identification (LID) Head on Decoder Hidden States**:
-      - `AuxiliaryLIDHead(d_model, num_labels=3)` is a 2-layer LayerNorm + GELU
-        MLP attached to the final decoder layer hidden states `decoder_hidden_states[-1]`
-        of shape `(batch_size, seq_len, d_model)`.
-      - `align_word_tags_to_subwords()` tokenizes each reference word $w_k$ and
-        projects its reviewed language tag $t_k \in \{\text{HI}=0, \text{EN}=1, \text{OTHER}=2\}$
-        onto all subword tokens belonging to $w_k$.
-      - All prefix prompt tokens (`<|startoftranscript|>`, language, task,
-        `<|notimestamps|>`), `<|endoftext|>`, and right-padding positions are
-        masked with `IGNORE_INDEX = -100`.
-      - The joint training loss combines standard ASR cross-entropy loss and
-        token-level LID cross-entropy loss using configurable weight $\lambda_{\text{LID}}$
-        (`lid_loss_weight`):
-
-            L_total = L_ASR + (lid_loss_weight * L_LID)
-
-      - Setting `auxiliary_lid.enabled: false` (`lid_loss_weight: 0.0`) trains
-        **LoRA Alone**, allowing a clean ablation against **LoRA + LID Head**.
-
-   3) **Three-Stage Curriculum Learning (`CurriculumTrainingRunner`)**:
-      - **Stage 1 (`monolingual`)**: Trains on monolingual utterances (`CMI = 0`,
-        187 utterances in MUCS 2021 train split) to stabilize base formatting.
-      - **Stage 2 (`real_mixed`)**: Trains on natural code-switched utterances
-        (`CMI > 0`, 1,834 utterances in MUCS 2021 train split) to adapt decoder
-        attention to `HI -> EN` and `EN -> HI` transitions.
-      - **Stage 3 (`all_with_synthetic`)**: Optionally supplements real mixed
-        speech with synthetic code-mixed utterances (restricted to `train` only).
-
-   4) **Checkpoint Saving & Reload Verification (`verify_checkpoint_reload`)**:
-      - Saves `lora_adapter/`, `lid_head.pt`, `base_config/`, `training_config.json`,
-        and `training_metrics.json`.
-      - Automatically reloads the saved checkpoint from disk and verifies that
-        both ASR logits and LID logits match pre-save outputs (`max_abs_diff = 0.0`,
+      - `AuxiliaryLIDHead(d_model=768, num_labels=3)` (`297,987` trainable params)
+        predicts `0: HI, 1: EN, 2: OTHER` from `decoder_hidden_states[-1]`.
+      - `align_word_tags_to_subwords()` maps each reference word's language tag
+        to its subword tokens while masking all prefix special tokens, EOS, and
+        padding positions with `IGNORE_INDEX = -100`.
+      - Joint objective: `L_total = L_ASR + (lid_loss_weight * L_LID)`.
+   3) **Three-Stage Curriculum Learning & Checkpoint Reload Verification**:
+      - Stage 1 (`monolingual`, CMI = 0) -> Stage 2 (`real_mixed`, CMI > 0) ->
+        Stage 3 (`all_with_synthetic`, train split only).
+      - Saves adapters and `lid_head.pt` to `checkpoints/whisper_small_lora_only`
+        and `checkpoints/whisper_small_lora_plus_lid` and verifies exact reload
+        equivalence (`asr_max_abs_diff = 0.0`, `lid_max_abs_diff = 0.0`,
         `reload_verified = true`).
 
 E. Switch-Boundary Evaluation & Deterministic Edit Attribution
    (`switchboard/evaluation/boundary.py`)
-   1) **Switch-Boundary Detection (`detect_switch_boundaries`)**:
-      - Scans reference `lang_tags` for adjacent `HI -> EN` and `EN -> HI` pairs
-        at indices `(i, i + 1)`.
-      - Marks index `i` as **Before Switch (`pre_index`)** and index `i + 1` as
-        **After Switch (`post_index`)**.
-      - **Overlapping Switches:** If a word sits between two switches (e.g.,
-        `"meeting"` at index 1 in `"kal [HI] meeting [EN] ke [HI]"`), it is stored
-        in `boundary_indices` as a set element so it is **counted only once** in
-        the pooled Boundary WER denominator, and recorded in
-        `overlapping_boundary_indices`.
-      - **`OTHER` Token Policy:** By default (`bridge_other=False`), `OTHER`
-        tokens (proper names like `"Rahul"`, software names like `"Thunderbird"`,
-        fillers like `"umm"` / `"हम्म"`, and numbers) are language-neutral and
-        do not trigger a switch transition with adjacent `HI` or `EN` words.
-
-   2) **Word-Level Edit Distance Alignment & Deterministic Insertion Attribution
-      (`align_and_attribute_edits`)**:
-      - Aligns hypothesis words $H = [h_0, \dots, h_{M-1}]$ to reference words
-        $R = [r_0, \dots, r_{N-1}]$ using a Wagner-Fischer dynamic programming
-        lattice that minimizes total edit distance $(S + D + I)$ while maximizing
-        exact word matches (`MATCH`), with deterministic backtracking tie-breaking
-        (`MATCH > SUB > DEL > INS`).
-      - **Substitution (`SUB`)** at reference word $r_i$ assigns 1 error to reference index $i$.
-      - **Deletion (`DEL`)** of reference word $r_i$ assigns 1 error to reference index $i$.
-      - **Deterministic Insertion (`INS`) Rule**:
-        Every insertion occurring at reference cursor $i \in \{0, 1, \dots, N\}$
-        (after $i$ reference words have been consumed) is assigned to:
-
-            attributed_ref_index(i) = max(0, i - 1)
-
-        * Leading insertions before the first reference word ($i = 0$) are
-          assigned to reference index `0`.
-        * Interior insertions between reference word $i-1$ and $i$ ($1 \le i < N$)
-          are assigned to the immediately preceding reference word `i - 1`.
-        * Trailing insertions after the final reference word ($i = N$) are
-          assigned to the final reference word `N - 1`.
-      - Because every reference word index $0 \dots N-1$ is either in the
-        **Boundary set ($B$)** or **Non-Boundary set ($NB$)** ($B \cap NB = \emptyset$,
-        $|B| + |NB| = N$), and every edit is attributed to a single reference index:
-
-            Boundary Errors + Non-Boundary Errors = Total Word Errors (S + D + I)
-            Boundary WER     = Boundary Errors / |B|
-            Non-Boundary WER = Non-Boundary Errors / |NB|
-
-        If $|B| = 0$ (e.g., a monolingual utterance), `Boundary WER` is marked
-        `"unavailable"`.
-
-   3) **Code-Mixing Index (CMI) (`compute_cmi`)**:
-      - Computed from reference language tags following Gambäck & Das (2014):
-        Let $w_{\text{HI}} = \text{count(HI)}$, $w_{\text{EN}} = \text{count(EN)}$,
-        and $N_{\text{lang}} = w_{\text{HI}} + w_{\text{EN}}$ (excluding `OTHER` tokens):
-
-            CMI = 100 * (1 - max(w_HI, w_EN) / N_lang)   if N_lang > 0 else 0.0
-
-      - Ranges from `0.0` (monolingual) to `50.0` (50/50 balanced mixing).
-      - Utterances are grouped into 4 CMI buckets (`0 Monolingual`, `0-15 Low`,
-        `15-30 Moderate`, `>30 High`) and correlated against WER using Pearson $r$.
+   - Marks `pre_index` (`i`) and `post_index` (`i+1`) for every adjacent
+     `HI -> EN` and `EN -> HI` switch; overlapping boundary words touched by two
+     switches are counted **once** in the pooled boundary word set.
+   - Aligns hypothesis to reference via Wagner-Fischer word-level edit distance
+     and attributes insertions deterministically:
+       * Beginning insertion ($i = 0$) -> reference position `0`
+       * Internal insertion ($1 \le i < N$) -> preceding reference position `i - 1`
+       * Ending insertion ($i = N$) -> last reference position `N - 1`
+       * Empty reference ($N = 0$) -> utterance-level insertion (`op="UTT_INS"`, `attributed_ref_index=-1`)
+   - Exports all 6 required research files to `outputs/full_benchmark_real/`:
+     `per_utterance_metrics.csv`, `per_word_alignment.csv`,
+     `aggregate_metrics.json`, `model_comparison.csv`,
+     `error_analysis_breakdowns.csv`, and `evaluation_config.json`.
 
 
-3. KEY EXPERIMENTAL FINDINGS ON YOUR MUCS 2021 DATASET (517 TEST UTTERANCES)
+3. REAL EXPERIMENTAL MEASUREMENTS vs. ISOLATED DEMO / SMOKE OUTPUTS
 --------------------------------------------------------------------------------
-On the 517 held-out test utterances (`6,559` total reference words: `2,852`
-switch-boundary words and `3,707` non-boundary words across 5 unseen speakers):
+SwitchBoard enforces strict separation between three tiers of outputs:
 
-  1) **Switch Boundaries Are 3.47x Harder for Baseline Whisper Small:**
-     - Baseline Whisper Small (`openai/whisper-small`) has a **Non-Boundary WER
-       of only 8.01% (297/3707)**, but its **Boundary WER jumps to 27.81%
-       (793/2852)** — proving that code-switching errors concentrate heavily on
-       the words immediately before and after a language switch.
+  1) **Actual Model Benchmark Measurements (`outputs/full_benchmark_real/`)**:
+     Evaluated via real PyTorch inference on 20 deterministic held-out MUCS 2021
+     Hindi–English test utterances (`275` reference words: `103` switch-boundary
+     words and `172` non-boundary words across all 5 unseen test speakers
+     `mucs_834022`, `mucs_847066`, `mucs_918821`, `mucs_921151`, `mucs_957491`):
 
-  2) **Cross-Script Normalization Is Essential for Fair Scoring:**
-     - `indicwhisper_hi_comparison` has a **Raw WER of 18.99% (1247/6565)**
-       because it outputs Devanagari for English technical terms (e.g., `"क्लिक"`
-       for `"click"`). After applying SwitchBoard's cross-script normalizer, its
-       **Normalized WER drops to 11.04% (724/6559)** — a **7.95 percentage-point**
-       artificial error reduction while still counting genuine word errors.
+     - `openai/whisper-small (baseline)`:
+       * Raw WER: `102.18% (281/275)` -> Norm WER: `97.82% (269/275)`
+       * Norm CER: `81.59% (1259/1543)`
+       * Boundary WER: `82.52% (85/103)` | Non-Boundary WER: `106.98% (184/172)`
+       * RTF: `1.1837` (CPU)
+     - `whisper-small + LoRA only` (6-step CPU smoke-trained adapter on real `openai/whisper-small`):
+       * Raw WER: `107.64% (296/275)` -> Norm WER: `104.73% (288/275)`
+       * Boundary WER: `91.26% (94/103)` | Non-Boundary WER: `112.79% (194/172)`
+       * RTF: `1.5437` (CPU)
+     - `whisper-small + LoRA + LID head` (6-step CPU smoke-trained adapter + LID head on real `openai/whisper-small`):
+       * Raw WER: `106.18% (292/275)` -> Norm WER: `103.27% (284/275)`
+       * Boundary WER: `93.20% (96/103)` | Non-Boundary WER: `109.30% (188/172)`
+       * RTF: `1.8958` (CPU)
+     - `indicwhisper (vasista22/whisper-hindi-small)`:
+       * Raw WER: `77.82% (214/275)` -> Norm WER: `73.09% (201/275)`
+       * Norm CER: `59.11% (912/1543)`
+       * Boundary WER: `50.49% (52/103)` (`-32.04 pp` improvement over `openai/whisper-small` baseline!)
+       * Non-Boundary WER: `86.63% (149/172)`
+       * RTF: `3.6049` (CPU)
 
-  3) **LoRA + Auxiliary LID Head Significantly Outperforms LoRA Alone at Switch Boundaries:**
-     - **Baseline Whisper Small:** Overall Norm WER = `16.62%`, Boundary WER = `27.81%`
-     - **Whisper Small + LoRA Only:** Overall Norm WER = `8.22%`, Boundary WER = `13.50%`
-       (`-14.31 pp` boundary improvement over baseline)
-     - **Whisper Small + LoRA + Auxiliary LID Head:** Overall Norm WER = `4.24%`,
-       Boundary WER = `5.82%` (`-21.98 pp` boundary improvement over baseline, and
-       an additional `-7.68 pp` boundary error reduction over LoRA alone!).
-     - Supervising decoder hidden states with subword language tags (`HI`, `EN`,
-       `OTHER`) directly helps the decoder anticipate language transitions across
-       both `HI -> EN` (`27.67% -> 4.94%`) and `EN -> HI` (`28.26% -> 6.08%`) switches.
+  2) **Smoke-Test Verification Outputs (`outputs/smoke_test/`)**:
+     Real PyTorch inference on the 5-utterance held-out MUCS 2021 smoke subset
+     (`59` reference words: `30` boundary words, `29` non-boundary words):
+     - `openai/whisper-small (baseline)`: Norm WER `88.14%`, Boundary WER `43.33% (13/30)`
+     - `whisper-small + LoRA only`: Norm WER `84.75%`, Boundary WER `40.00% (12/30)` (`-3.33 pp`)
+     - `whisper-small + LoRA + LID head`: Norm WER `84.75%`, Boundary WER `40.00% (12/30)` (`-3.33 pp`)
+     - `indicwhisper (vasista22/whisper-hindi-small)`: Norm WER `38.98%`, Boundary WER `30.00% (9/30)` (`-13.33 pp`)
+
+  3) **Classroom Demo Simulation Fixture (`outputs/demo/`)**:
+     Explicitly flagged with `is_simulated: true` and `SIMULATED DATA — NOT REAL MODEL RESULTS`.
+     Isolated to `data/demo/` and `outputs/demo/` for demonstrating hand-calculated
+     switch-boundary math in the classroom without contaminating research results.
 ================================================================================

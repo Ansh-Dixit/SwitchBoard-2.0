@@ -48,5 +48,5 @@ training:
   warmup_ratio: 0.1
   weight_decay: 0.01
   seed: 42
-  output_dir: "outputs/full_checkpoints/whisper_small_lora_plus_lid"
+  output_dir: "checkpoints/colab_full_whisper_small_lora_plus_lid"
   manifest_path: "data/full_corpus/unified_manifest.jsonl"

@@ -1,0 +1,70 @@
+# Dedicated CPU Exploratory Training Configuration — Experiment A: LoRA-Only
+# Target Hardware: Intel Core i5 (12 cores / 16 threads), 16 GB RAM, Windows CPU-only (FP32)
+experiment_name: "cpu_exploratory_whisper_small_lora_only"
+run_tier: "cpu_exploratory"
+base_model_name_or_path: "openai/whisper-small"
+allow_tiny_architecture_for_cpu_smoke: false
+
+hardware:
+  device: "cpu"
+  precision: "fp32"
+  num_threads: 8          # Configured for 13th Gen Intel Core i5-1340P to prevent thread contention
+  dataloader_workers: 0   # Lazy main-thread loading on Windows CPU
+  gradient_checkpointing: false  # Frozen encoder runs under torch.no_grad(), saving >60% RAM without recompute overhead
+
+lora:
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "out_proj"
+  decoder_attention_only: true
+
+auxiliary_lid:
+  enabled: false
+  lid_loss_weight: 0.0
+  num_labels: 3  # 0: HI, 1: EN, 2: OTHER
+  hidden_dropout: 0.1
+
+curriculum:
+  enabled: true
+  disable_stage3_on_cpu: true   # Configurable disabling of Stage 3 on CPU when no synthetic supplement is present
+  stages:
+    - name: "stage1_monolingual"
+      description: "Stage 1: Monolingual Hindi and English speech (train split only)"
+      filter_mode: "monolingual"
+      epochs: 1
+      learning_rate: 5.0e-5
+      max_utterances: 40
+      max_steps: 5
+    - name: "stage2_real_mixed"
+      description: "Stage 2: Real Hindi-English code-switched speech (train split only)"
+      filter_mode: "real_mixed"
+      epochs: 1
+      learning_rate: 3.0e-5
+      max_utterances: 160
+      max_steps: 20
+    - name: "stage3_synthetic_supplement"
+      description: "Stage 3 (Optional): Synthetic mixed speech supplement (disabled on CPU)"
+      filter_mode: "all_with_synthetic"
+      enabled: false
+      epochs: 1
+      learning_rate: 2.0e-5
+      max_utterances: 40
+      max_steps: 5
+
+training:
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  max_train_utterances: 200
+  val_subset_utterances: 5
+  early_stopping_patience: 2
+  weight_decay: 0.01
+  fp16: false
+  seed: 42
+  resume_if_exists: true
+  output_dir: "checkpoints/whisper_small_lora_only_cpu"
+  manifest_path: "data/full_corpus/unified_manifest.jsonl"

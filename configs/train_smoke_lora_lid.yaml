@@ -1,8 +1,8 @@
-# Smoke-Test Configuration 2: Whisper LoRA + Auxiliary Language Identification (LID) Head
-experiment_name: "smoke_whisper_lora_lid"
-run_tier: "smoke_test"  # Keeps smoke-test outputs strictly separate from full benchmark results
+# Smoke-Test Configuration 2: Real openai/whisper-small PEFT LoRA + Auxiliary Language Identification (LID) Head
+experiment_name: "smoke_whisper_small_lora_lid"
+run_tier: "smoke_test"
 base_model_name_or_path: "openai/whisper-small"
-allow_tiny_architecture_for_cpu_smoke: true
+allow_tiny_architecture_for_cpu_smoke: false
 
 lora:
   r: 8
@@ -44,6 +44,7 @@ training:
   batch_size: 2
   gradient_accumulation_steps: 1
   max_steps_per_stage: 2
+  fp16: false
   seed: 42
-  output_dir: "outputs/smoke_checkpoints/lora_plus_lid"
-  manifest_path: "data/demo_fixture/manifest.jsonl"
+  output_dir: "checkpoints/whisper_small_lora_plus_lid"
+  manifest_path: "data/full_corpus/unified_manifest.jsonl"

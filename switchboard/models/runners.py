@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,7 @@ from transformers import (
     AutoConfig,
     AutoModelForCTC,
     AutoProcessor,
+    Wav2Vec2Processor,
     WhisperForConditionalGeneration,
     WhisperProcessor,
 )
@@ -114,6 +116,7 @@ class WhisperBaselineRunner(ASRRunner):
 
         self.processor = WhisperProcessor.from_pretrained(checkpoint_id)
         self.model = WhisperForConditionalGeneration.from_pretrained(checkpoint_id)
+        self.model_revision = getattr(self.model.config, "_commit_hash", None) or "local_or_default"
         self.model.to(self.device)
         self.model.eval()
 
@@ -124,6 +127,7 @@ class WhisperBaselineRunner(ASRRunner):
             "num_beams": self.num_beams,
             "max_new_tokens": self.max_new_tokens,
             "device": self.device,
+            "model_revision": self.model_revision,
         }
 
     @torch.no_grad()
@@ -135,6 +139,7 @@ class WhisperBaselineRunner(ASRRunner):
             waveform,
             sampling_rate=TARGET_SAMPLE_RATE,
             return_tensors="pt",
+            return_attention_mask=True,
         )
         input_features = inputs.input_features.to(self.device)
 
@@ -142,7 +147,10 @@ class WhisperBaselineRunner(ASRRunner):
             "task": "transcribe",
             "num_beams": self.num_beams,
             "max_new_tokens": self.max_new_tokens,
+            "no_repeat_ngram_size": 3,
         }
+        if "attention_mask" in inputs and inputs.attention_mask is not None:
+            gen_kwargs["attention_mask"] = inputs.attention_mask.to(self.device)
         if self.language:
             gen_kwargs["language"] = self.language
 
@@ -154,9 +162,12 @@ class WhisperBaselineRunner(ASRRunner):
                 input_features,
                 num_beams=self.num_beams,
                 max_new_tokens=self.max_new_tokens,
+                no_repeat_ngram_size=3,
             )
 
-        text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        raw_decoded = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        text = re.sub(r"<\|[^|>]+\|>", " ", raw_decoded).strip()
+        text = " ".join(text.split())
         elapsed = max(1e-6, time.perf_counter() - t0)
         rtf = round(elapsed / dur, 6)
 
@@ -217,6 +228,23 @@ class WhisperPeftRunner(ASRRunner):
             base_model_override=base_checkpoint_id,
             device=self.device,
         )
+        metrics_p = self.adapter_dir / "training_metrics.json"
+        if metrics_p.exists():
+            m_data = json.loads(metrics_p.read_text(encoding="utf-8"))
+            if m_data.get("used_tiny_fallback"):
+                raise RuntimeError(
+                    f"Checkpoint at '{self.adapter_dir}' was created with a randomly initialized tiny fallback architecture "
+                    f"(used_tiny_fallback=True) and is NOT a functional speech recognition model. "
+                    f"Please train on real 'openai/whisper-small' with allow_tiny_architecture_for_cpu_smoke=false."
+                )
+
+        base_d_model = int(getattr(loaded["peft_model"].base_model.model.config, "d_model", 0))
+        if base_d_model < 384:
+            raise RuntimeError(
+                f"Checkpoint at '{self.adapter_dir}' has d_model={base_d_model} (< 384) indicating a randomly initialized "
+                f"unit-test fallback model rather than a pretrained Whisper checkpoint."
+            )
+
         self.peft_model = loaded["peft_model"]
         self.lid_head = loaded["lid_head"]
         self.processor = loaded["processor"]
@@ -244,6 +272,7 @@ class WhisperPeftRunner(ASRRunner):
             waveform,
             sampling_rate=TARGET_SAMPLE_RATE,
             return_tensors="pt",
+            return_attention_mask=True,
         )
         input_features = inputs.input_features.to(self.device)
 
@@ -251,7 +280,10 @@ class WhisperPeftRunner(ASRRunner):
             "task": "transcribe",
             "num_beams": self.num_beams,
             "max_new_tokens": self.max_new_tokens,
+            "no_repeat_ngram_size": 3,
         }
+        if "attention_mask" in inputs and inputs.attention_mask is not None:
+            gen_kwargs["attention_mask"] = inputs.attention_mask.to(self.device)
         if self.language:
             gen_kwargs["language"] = self.language
 
@@ -262,9 +294,12 @@ class WhisperPeftRunner(ASRRunner):
                 input_features=input_features,
                 num_beams=self.num_beams,
                 max_new_tokens=self.max_new_tokens,
+                no_repeat_ngram_size=3,
             )
 
-        text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        raw_decoded = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        text = re.sub(r"<\|[^|>]+\|>", " ", raw_decoded).strip()
+        text = " ".join(text.split())
 
         subword_lid_preds: Optional[List[Dict[str, Any]]] = None
         if self.lid_head is not None and generated_ids.shape[1] > 1:
@@ -329,8 +364,12 @@ class Wav2Vec2CTCRunner(ASRRunner):
                 f"(Wav2Vec2ForCTC). Please fine-tune a CTC head first or provide a fine-tuned CTC checkpoint."
             )
 
-        self.processor = AutoProcessor.from_pretrained(checkpoint_id)
+        try:
+            self.processor = Wav2Vec2Processor.from_pretrained(checkpoint_id)
+        except Exception:
+            self.processor = AutoProcessor.from_pretrained(checkpoint_id)
         self.model = AutoModelForCTC.from_pretrained(checkpoint_id)
+        self.model_revision = getattr(self.model.config, "_commit_hash", None) or "local_or_default"
         self.model.to(self.device)
         self.model.eval()
 
@@ -339,6 +378,7 @@ class Wav2Vec2CTCRunner(ASRRunner):
             "task": "transcribe",
             "decoding": "ctc_greedy",
             "device": self.device,
+            "model_revision": self.model_revision,
         }
 
     @torch.no_grad()
